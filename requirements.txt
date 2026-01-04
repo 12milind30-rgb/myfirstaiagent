@@ -7,3 +7,5 @@ mlxtend
 openai
 langchain
 openpyxl
+langchain-openai
+langchain
