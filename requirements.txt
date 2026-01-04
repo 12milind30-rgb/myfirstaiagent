@@ -1,9 +1,9 @@
 streamlit
 pandas
 plotly
-mlxtend
 openpyxl
 openai
 langchain
+langchain-core
 langchain-openai
 langchain-community

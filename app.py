@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.express as px
 from mlxtend.frequent_patterns import apriori, association_rules
 from langchain_openai import ChatOpenAI
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Mithas AI Manager", layout="wide")
