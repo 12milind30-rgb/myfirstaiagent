@@ -1,0 +1,9 @@
+streamlit
+pandas
+numpy
+matplotlib
+seaborn
+mlxtend
+openai
+langchain
+openpyxl
