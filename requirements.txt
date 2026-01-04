@@ -1,12 +1,9 @@
 streamlit
 pandas
-numpy
-matplotlib
-seaborn
+plotly
 mlxtend
+openpyxl
 openai
 langchain
-openpyxl
 langchain-openai
-langchain
-plotly
+langchain-community
