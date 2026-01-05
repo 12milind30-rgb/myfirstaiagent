@@ -15,7 +15,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 5.0", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 5.1", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -64,7 +64,8 @@ def get_star_items_with_hours(df):
     """Req: Top 20 items + Contribution + Peak Selling Hours"""
     total_rev = df['TotalAmount'].sum()
     item_stats = df.groupby('ItemName').agg({'TotalAmount': 'sum'}).reset_index()
-    item_stats['Contribution %'] = (item_stats['TotalAmount'] / total_rev) # Keep as decimal for progress bar
+    # FIX: Multiply by 100 to get percentage like 37.00 instead of 0.37
+    item_stats['Contribution %'] = (item_stats['TotalAmount'] / total_rev) * 100 
     item_stats = item_stats.sort_values('TotalAmount', ascending=False).head(20)
     
     # Calculate Peak Hour for each star item
@@ -72,9 +73,7 @@ def get_star_items_with_hours(df):
     for item in item_stats['ItemName']:
         item_data = df[df['ItemName'] == item]
         if 'Hour' in df.columns and not item_data.empty:
-            # Find the hour with max quantity sold
             peak = item_data.groupby('Hour')['Quantity'].sum().idxmax()
-            # Format nicely (e.g., "19:00 - 20:00")
             peak_str = f"{int(peak):02d}:00 - {int(peak)+1:02d}:00"
         else:
             peak_str = "N/A"
@@ -89,12 +88,14 @@ def get_contribution_lists(df):
     
     # Category Level
     cat_df = df.groupby('Category')['TotalAmount'].sum().reset_index()
-    cat_df['Contribution'] = (cat_df['TotalAmount'] / total_rev)
+    # FIX: Multiply by 100
+    cat_df['Contribution'] = (cat_df['TotalAmount'] / total_rev) * 100
     cat_df = cat_df.sort_values('TotalAmount', ascending=False)
     
     # Item Level (within Category)
     item_df = df.groupby(['Category', 'ItemName'])['TotalAmount'].sum().reset_index()
-    item_df['Contribution'] = (item_df['TotalAmount'] / total_rev)
+    # FIX: Multiply by 100
+    item_df['Contribution'] = (item_df['TotalAmount'] / total_rev) * 100
     item_df = item_df.sort_values(['Category', 'TotalAmount'], ascending=[True, False])
     
     return cat_df, item_df
@@ -112,7 +113,7 @@ def analyze_peak_hour_items(df):
     
     return top_items, top_3_hours
 
-# --- ADVANCED MODULES (UNCHANGED) ---
+# --- ADVANCED MODULES ---
 
 def analyze_pareto_hierarchical(df):
     item_rev = df.groupby(['Category', 'ItemName'])['TotalAmount'].sum().reset_index()
@@ -128,10 +129,12 @@ def analyze_pareto_hierarchical(df):
     percentage_of_menu = (pareto_unique_items / total_unique_items) * 100
     
     cat_rev = df.groupby('Category')['TotalAmount'].sum().reset_index()
-    cat_rev['CatContrib'] = (cat_rev['TotalAmount'] / total_revenue)
+    # FIX: Multiply by 100
+    cat_rev['CatContrib'] = (cat_rev['TotalAmount'] / total_revenue) * 100
     
     merged = pd.merge(pareto_items, cat_rev[['Category', 'CatContrib']], on='Category', how='left')
-    merged['ItemContrib'] = (merged['TotalAmount'] / total_revenue)
+    # FIX: Multiply by 100
+    merged['ItemContrib'] = (merged['TotalAmount'] / total_revenue) * 100
     
     display_df = merged[['Category', 'CatContrib', 'ItemName', 'ItemContrib', 'TotalAmount']]
     display_df = display_df.sort_values(['CatContrib', 'TotalAmount'], ascending=[False, False])
@@ -190,7 +193,7 @@ def advanced_forecast(df):
     return pd.DataFrame(forecast_results)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 5.0")
+st.title("📊 Mithas Restaurant Intelligence 5.1")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data", type=['xlsx'])
 
 if uploaded_file:
@@ -200,7 +203,7 @@ if uploaded_file:
         "Overview", "Pareto (Visual)", "Time Series", "Smart Combos", "Demand Forecast", "AI Chat"
     ])
 
-    # --- TAB 1: OVERVIEW (UPDATED) ---
+    # --- TAB 1: OVERVIEW (FIXED PERCENTAGES) ---
     with tab1:
         st.header("🏢 Business Overview")
         
@@ -258,7 +261,7 @@ if uploaded_file:
             st.dataframe(
                 cat_cont[['Category', 'TotalAmount', 'Contribution']],
                 column_config={
-                    "Contribution": st.column_config.ProgressColumn("Share %", format="%.2f%%", min_value=0, max_value=1),
+                    "Contribution": st.column_config.ProgressColumn("Share %", format="%.2f%%", min_value=0, max_value=100),
                     "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")
                 },
                 hide_index=True,
@@ -270,7 +273,7 @@ if uploaded_file:
             st.dataframe(
                 item_cont[['Category', 'ItemName', 'TotalAmount', 'Contribution']],
                 column_config={
-                    "Contribution": st.column_config.NumberColumn("Share %", format="%.4f%%"), # More precision for items
+                    "Contribution": st.column_config.NumberColumn("Share %", format="%.2f%%"),
                     "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")
                 },
                 hide_index=True,
@@ -295,7 +298,7 @@ if uploaded_file:
             use_container_width=True
         )
 
-    # --- TAB 2: PARETO (UNCHANGED) ---
+    # --- TAB 2: PARETO (FIXED PERCENTAGES) ---
     with tab2:
         st.header("🏆 Pareto Analysis")
         pareto_df, ratio_msg, menu_perc = analyze_pareto_hierarchical(df)
