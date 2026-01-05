@@ -9,294 +9,318 @@ from mlxtend.frequent_patterns import apriori, association_rules
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from datetime import timedelta
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+import warnings
+
+warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Analytics Pro", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Mithas Intelligence 4.0", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
 def load_data(file):
     df = pd.read_excel(file)
-    
-    # Standardize Columns
     col_map = {
         'Invoice No.': 'OrderID', 'Item Name': 'ItemName', 'Qty.': 'Quantity',
         'Final Total': 'TotalAmount', 'Price': 'UnitPrice', 'Category': 'Category',
         'Timestamp': 'Time', 'Date': 'Date'
     }
     df = df.rename(columns=col_map)
-    
-    # Numeric Cleanup
     for c in ['Quantity', 'TotalAmount', 'UnitPrice']:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-    
-    # Date Cleanup
     if 'Date' in df.columns:
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
         df['DayOfWeek'] = df['Date'].dt.day_name()
     
     # Hour Extraction
     if 'Time' in df.columns:
-        # Try-catch for time parsing
         try:
             df['Hour'] = pd.to_datetime(df['Time'].astype(str), format='%H:%M:%S', errors='coerce').dt.hour
             if df['Hour'].isnull().all():
                  df['Hour'] = pd.to_datetime(df['Time'], errors='coerce').dt.hour
         except:
             df['Hour'] = 0
-            
     return df
 
 # --- ANALYTICS MODULES ---
 
-def get_overview_metrics(df):
-    """Calculates Tab 1 KPI Cards"""
+def get_star_items_with_hours(df):
+    """Req 1: Top 20 items + Their Peak Selling Hour"""
     total_rev = df['TotalAmount'].sum()
-    total_orders = df['OrderID'].nunique()
+    item_stats = df.groupby('ItemName').agg({'TotalAmount': 'sum'}).reset_index()
+    item_stats['Contribution'] = (item_stats['TotalAmount'] / total_rev)
+    item_stats = item_stats.sort_values('TotalAmount', ascending=False).head(20)
     
-    # Time-based averages
-    num_days = df['Date'].nunique()
-    avg_rev_day = total_rev / num_days if num_days > 0 else 0
-    
-    # Weekly Average (Approximate if data < 1 week)
-    num_weeks = max(1, num_days / 7)
-    avg_rev_week = total_rev / num_weeks
-    
-    aov = total_rev / total_orders if total_orders > 0 else 0
-    
-    return total_rev, total_orders, avg_rev_day, avg_rev_week, aov
+    # Calculate Peak Hour for each star item
+    peak_hours = []
+    for item in item_stats['ItemName']:
+        item_data = df[df['ItemName'] == item]
+        if 'Hour' in df.columns and not item_data.empty:
+            # Find the hour with max quantity sold
+            peak = item_data.groupby('Hour')['Quantity'].sum().idxmax()
+            peak_str = f"{int(peak)}:00 - {int(peak)+1}:00"
+        else:
+            peak_str = "N/A"
+        peak_hours.append(peak_str)
+        
+    item_stats['Peak Selling Hour'] = peak_hours
+    return item_stats
 
-def analyze_peak_days(df):
-    """Sorts days by total revenue"""
-    days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-    daily = df.groupby('DayOfWeek')['TotalAmount'].sum().reindex(days_order).reset_index()
-    return daily
-
-def analyze_peak_hour_items(df):
-    """Finds top 3 peak hours and lists items sold then"""
-    if 'Hour' not in df.columns: return pd.DataFrame(), []
-    
-    hourly_rev = df.groupby('Hour')['TotalAmount'].sum()
-    # Get top 3 hours
-    top_3_hours = hourly_rev.nlargest(3).index.tolist()
-    
-    # Filter data for those hours
-    peak_df = df[df['Hour'].isin(top_3_hours)]
-    top_items = peak_df.groupby('ItemName')['Quantity'].sum().sort_values(ascending=False).head(10).reset_index()
-    
-    return top_items, top_3_hours
-
-def get_contribution_lists(df):
-    """Calculates % contribution for Categories and Items"""
-    total_rev = df['TotalAmount'].sum()
-    
-    # Category Level
-    cat_df = df.groupby('Category')['TotalAmount'].sum().reset_index()
-    cat_df['Contribution %'] = (cat_df['TotalAmount'] / total_rev) * 100
-    cat_df = cat_df.sort_values('TotalAmount', ascending=False)
-    
-    # Item Level (within Category)
-    item_df = df.groupby(['Category', 'ItemName'])['TotalAmount'].sum().reset_index()
-    item_df['Contribution %'] = (item_df['TotalAmount'] / total_rev) * 100
-    item_df = item_df.sort_values('TotalAmount', ascending=False)
-    
-    # Star Items (Global Top 20)
-    stars = df.groupby('ItemName')['TotalAmount'].sum().reset_index()
-    stars['Contribution %'] = (stars['TotalAmount'] / total_rev) * 100
-    stars = stars.sort_values('TotalAmount', ascending=False).head(20)
-    
-    return cat_df, item_df, stars
-
-def analyze_pareto(df):
-    """Pareto Logic for Tab 2"""
-    item_rev = df.groupby(['ItemName', 'Category'])['TotalAmount'].sum().reset_index()
-    item_rev = item_rev.sort_values('TotalAmount', ascending=False)
-    
+def analyze_pareto_hierarchical(df):
+    """Req 2: Hierarchical Pareto (Cat -> Item) matching user image"""
+    # 1. Identify Top 80% Revenue Items
+    item_rev = df.groupby(['Category', 'ItemName'])['TotalAmount'].sum().reset_index()
     total_revenue = item_rev['TotalAmount'].sum()
+    item_rev = item_rev.sort_values('TotalAmount', ascending=False)
     item_rev['Cumulative'] = item_rev['TotalAmount'].cumsum()
     item_rev['CumPerc'] = 100 * item_rev['Cumulative'] / total_revenue
     
-    top_80 = item_rev[item_rev['CumPerc'] <= 82]
-    return top_80
+    # The "Vital Few" items
+    pareto_items = item_rev[item_rev['CumPerc'] <= 80].copy()
+    
+    # Stats for the text summary
+    total_unique_items = df['ItemName'].nunique()
+    pareto_unique_items = pareto_items['ItemName'].nunique()
+    ratio_text = f"**{pareto_unique_items} items** (out of {total_unique_items}) contribute to 80% of your revenue."
+    percentage_of_menu = (pareto_unique_items / total_unique_items) * 100
+    
+    # 2. Calculate Category Contribution % (Global)
+    cat_rev = df.groupby('Category')['TotalAmount'].sum().reset_index()
+    cat_rev['CatContrib'] = (cat_rev['TotalAmount'] / total_revenue)
+    
+    # 3. Merge to create the structure
+    # We join the Pareto Items with their Category's total contribution
+    merged = pd.merge(pareto_items, cat_rev[['Category', 'CatContrib']], on='Category', how='left')
+    
+    # Calculate Item's contribution to Total Revenue
+    merged['ItemContrib'] = (merged['TotalAmount'] / total_revenue)
+    
+    # Format for display
+    display_df = merged[['Category', 'CatContrib', 'ItemName', 'ItemContrib', 'TotalAmount']]
+    display_df = display_df.sort_values(['CatContrib', 'TotalAmount'], ascending=[False, False])
+    
+    return display_df, ratio_text, percentage_of_menu
 
-def get_basket_rules(df, group_col='ItemName', min_conf=0.6):
-    basket = (df.groupby(['OrderID', group_col])['Quantity']
-              .sum().unstack().reset_index().fillna(0)
-              .set_index('OrderID'))
-    basket_sets = basket.applymap(lambda x: 1 if x > 0 else 0)
-    frequent = apriori(basket_sets, min_support=0.005, use_colnames=True)
-    if frequent.empty: return pd.DataFrame()
-    rules = association_rules(frequent, metric="confidence", min_threshold=min_conf)
-    rules['antecedents'] = rules['antecedents'].apply(lambda x: list(x)[0])
-    rules['consequents'] = rules['consequents'].apply(lambda x: list(x)[0])
-    return rules[['antecedents', 'consequents', 'confidence', 'lift']].sort_values('confidence', ascending=False)
-
-def plot_time_series_top5(df):
+def plot_time_series_fixed(df):
+    """Req 3: Time Series with Fixed Scale and Labels"""
     categories = df['Category'].unique()
     for cat in categories:
-        st.subheader(f"📈 {cat}: Top 5 Items Trend")
+        st.subheader(f"📈 {cat}")
         cat_data = df[df['Category'] == cat]
         top_items = cat_data.groupby('ItemName')['Quantity'].sum().nlargest(5).index.tolist()
+        
         subset = cat_data[cat_data['ItemName'].isin(top_items)]
         daily = subset.groupby(['Date', 'ItemName'])['Quantity'].sum().reset_index()
+        
         if daily.empty: continue
+
+        # Create Graph
         fig = px.line(daily, x='Date', y='Quantity', color='ItemName', markers=True)
+        
+        # Add Average Lines with explicit labels
         for item in top_items:
             avg_val = daily[daily['ItemName'] == item]['Quantity'].mean()
-            fig.add_hline(y=avg_val, line_dash="dot", annotation_text=f"Avg {item}", annotation_position="top left")
+            # Add annotation directly to the chart
+            fig.add_hline(y=avg_val, line_dash="dot", line_color="grey", opacity=0.5)
+            fig.add_annotation(
+                x=daily['Date'].max(), y=avg_val,
+                text=f"Avg: {avg_val:.1f}",
+                showarrow=False, yshift=10, font=dict(color="red", size=10)
+            )
+            
+        # Fix Scaling: Allow each graph to fit its own data (don't force 0-100 if data is 0-5)
+        fig.update_yaxes(matches=None, showticklabels=True)
         st.plotly_chart(fig, use_container_width=True)
 
-def correlation_heatmap(df, group_col):
-    pivot = df.pivot_table(index='Date', columns=group_col, values='Quantity', aggfunc='sum').fillna(0)
-    corr = pivot.corr()
-    fig, ax = plt.subplots(figsize=(10, 8))
-    sns.heatmap(corr, annot=False, cmap='coolwarm', ax=ax)
-    return fig
+def advanced_basket_analysis(df):
+    """Req 4: Lift-based Basket Analysis"""
+    # Filter for meaningful transactions (more than 1 item)
+    order_counts = df.groupby('OrderID')['ItemName'].count()
+    valid_orders = order_counts[order_counts > 1].index
+    df_basket = df[df['OrderID'].isin(valid_orders)]
+    
+    basket = (df_basket.groupby(['OrderID', 'ItemName'])['Quantity']
+              .sum().unstack().reset_index().fillna(0)
+              .set_index('OrderID'))
+    
+    basket_sets = basket.applymap(lambda x: 1 if x > 0 else 0)
+    
+    # Lower support to catch niche combos, filter by Lift later
+    frequent = apriori(basket_sets, min_support=0.005, use_colnames=True)
+    
+    if frequent.empty: return pd.DataFrame()
+    
+    # Metric = Lift (Strength of association)
+    # Lift > 1 means they appear together more often than random chance
+    rules = association_rules(frequent, metric="lift", min_threshold=1.2)
+    
+    # Clean up columns
+    rules['antecedents'] = rules['antecedents'].apply(lambda x: list(x)[0])
+    rules['consequents'] = rules['consequents'].apply(lambda x: list(x)[0])
+    
+    # Sort by Lift (Best combos first)
+    return rules[['antecedents', 'consequents', 'lift', 'confidence', 'support']].sort_values('lift', ascending=False).head(20)
 
-def forecast_demand(df):
+def advanced_forecast(df):
+    """Req 5: Holt-Winters Exponential Smoothing"""
     daily = df.groupby(['Date', 'ItemName'])['Quantity'].sum().reset_index()
-    forecasts = []
-    items = daily['ItemName'].unique()
-    last_date = daily['Date'].max()
-    next_30_days = [last_date + timedelta(days=x) for x in range(1, 31)]
-    for item in items:
-        item_data = daily[daily['ItemName'] == item].sort_values('Date')
-        avg_qty = item_data.tail(7)['Quantity'].mean() if len(item_data) >= 7 else item_data['Quantity'].mean()
-        for date in next_30_days:
-            forecasts.append({'Date': date.strftime('%Y-%m-%d'), 'ItemName': item, 'Predicted_Qty': round(avg_qty, 1)})
-    return pd.DataFrame(forecasts)
+    
+    # Get Top 10 Categories -> Top 10 items in each
+    top_cats = df.groupby('Category')['TotalAmount'].sum().nlargest(10).index.tolist()
+    
+    forecast_results = []
+    
+    for cat in top_cats:
+        cat_df = df[df['Category'] == cat]
+        top_items = cat_df.groupby('ItemName')['Quantity'].sum().nlargest(10).index.tolist()
+        
+        for item in top_items:
+            item_data = daily[daily['ItemName'] == item].set_index('Date')['Quantity']
+            # Reindex to fill missing days with 0 (Crucial for time series)
+            idx = pd.date_range(item_data.index.min(), item_data.index.max())
+            item_data = item_data.reindex(idx, fill_value=0)
+            
+            try:
+                # Use Holt-Winters (Trend + Seasonality) if enough data
+                if len(item_data) > 14:
+                    model = ExponentialSmoothing(item_data, trend='add', seasonal='add', seasonal_periods=7).fit()
+                    pred = model.forecast(30)
+                else:
+                    # Fallback to simple moving average if < 2 weeks data
+                    pred = pd.Series([item_data.mean()] * 30, index=pd.date_range(item_data.index.max() + timedelta(days=1), periods=30))
+                
+                total_expected_demand = pred.sum()
+                forecast_results.append({
+                    'Category': cat,
+                    'ItemName': item,
+                    'Total Predicted Demand (Next 30 Days)': round(total_expected_demand, 0)
+                })
+            except:
+                continue
+                
+    return pd.DataFrame(forecast_results)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 3.0")
-uploaded_file = st.sidebar.file_uploader("Upload Monthly/Daily Excel", type=['xlsx'])
+st.title("📊 Mithas Restaurant Intelligence 4.0")
+uploaded_file = st.sidebar.file_uploader("Upload Monthly Data", type=['xlsx'])
 
 if uploaded_file:
     df = load_data(uploaded_file)
-    if df['Date'].isnull().all():
-        st.error("⚠️ Error: 'Date' column is missing or empty.")
-        st.stop()
-
+    
     # TABS
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Overview", "Pareto Analysis", "Time Series", "Basket & Correlations", "Forecast", "AI Chat"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "Overview", "Pareto (Visual)", "Time Series", "Smart Combos", "Demand Forecast", "AI Chat"
+    ])
 
-    # --- TAB 1: OVERVIEW (NEW) ---
+    # --- TAB 1: OVERVIEW ---
     with tab1:
         st.header("🏢 Business Overview")
         
-        # 1. METRICS ROW
-        rev, orders, avg_day, avg_week, aov = get_overview_metrics(df)
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Total Revenue", f"₹{rev:,.0f}")
-        c2.metric("Total Orders", orders)
-        c3.metric("Avg Rev/Day", f"₹{avg_day:,.0f}")
-        c4.metric("Avg Rev/Week", f"₹{avg_week:,.0f}")
-        c5.metric("Avg Order Value", f"₹{aov:.0f}")
-        st.divider()
-
-        # 2. GRAPHS ROW (Peak Hours & Peak Days)
-        g1, g2 = st.columns(2)
-        with g1:
-            st.subheader("⌚ Peak Hours Graph")
-            if 'Hour' in df.columns:
-                hourly = df.groupby('Hour')['TotalAmount'].sum().reset_index()
-                st.bar_chart(hourly.set_index('Hour'))
-            else:
-                st.warning("No Time data found.")
+        # Attractive Metrics
+        total_rev = df['TotalAmount'].sum()
+        total_orders = df['OrderID'].nunique()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("💰 Total Revenue", f"₹{total_rev:,.0f}")
+        c2.metric("🧾 Total Orders", total_orders)
+        c3.metric("💳 Avg Order Value", f"₹{total_rev/total_orders:.0f}" if total_orders else 0)
         
-        with g2:
-            st.subheader("📅 Peak Days Graph")
-            daily_peak = analyze_peak_days(df)
-            st.bar_chart(daily_peak.set_index('DayOfWeek'))
-
         st.divider()
-
-        # 3. LISTS ROW (Peak Items & High Revenue Days)
-        l1, l2 = st.columns(2)
-        with l1:
-            peak_items, top_hours = analyze_peak_hour_items(df)
-            st.subheader(f"🔥 Items sold in Peak Hours ({top_hours})")
-            st.dataframe(peak_items, hide_index=True)
-            
-        with l2:
-            st.subheader("💰 High Revenue Days")
-            top_days = df.groupby('Date')['TotalAmount'].sum().sort_values(ascending=False).head(5).reset_index()
-            top_days['Date'] = top_days['Date'].dt.date
-            st.dataframe(top_days, hide_index=True)
-
-        st.divider()
-
-        # 4. CONTRIBUTIONS ROW
-        cat_cont, item_cont, star_items = get_contribution_lists(df)
         
-        c_col1, c_col2 = st.columns(2)
-        with c_col1:
-            st.subheader("📂 Category Contribution %")
-            st.dataframe(cat_cont[['Category', 'TotalAmount', 'Contribution %']], hide_index=True)
-            
-            st.subheader("⭐ Top 20 Star Items")
-            st.dataframe(star_items[['ItemName', 'TotalAmount', 'Contribution %']], hide_index=True)
+        # Attractive Star Items Table
+        st.subheader("⭐ Top 20 Star Items & Peak Hours")
+        star_df = get_star_items_with_hours(df)
+        
+        st.dataframe(
+            star_df,
+            column_config={
+                "TotalAmount": st.column_config.ProgressColumn(
+                    "Revenue", format="₹%f", min_value=0, max_value=star_df['TotalAmount'].max()
+                ),
+                "Contribution": st.column_config.NumberColumn(
+                    "Contribution", format="%.2f%%"
+                )
+            },
+            hide_index=True,
+            use_container_width=True
+        )
 
-        with c_col2:
-            st.subheader("🍽️ Item Contribution (by Category)")
-            st.dataframe(item_cont[['Category', 'ItemName', 'TotalAmount', 'Contribution %']], height=500, hide_index=True)
-
-    # --- TAB 2: PARETO ANALYSIS (MOVED HERE) ---
+    # --- TAB 2: PARETO ---
     with tab2:
-        st.header("🏆 Pareto Analysis (80/20 Rule)")
-        pareto_df = analyze_pareto(df)
+        st.header("🏆 Pareto Analysis")
+        pareto_df, ratio_msg, menu_perc = analyze_pareto_hierarchical(df)
         
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("##### Contribution of Categories to Top 80%")
-            cat_pie = px.pie(pareto_df, values='TotalAmount', names='Category', hole=0.4)
-            st.plotly_chart(cat_pie, use_container_width=True)
+        st.info(f"💡 **Insight:** {ratio_msg} (Only {menu_perc:.1f}% of your menu!)")
         
-        with col2:
-            st.markdown("##### Items driving 80% of Business")
-            st.dataframe(pareto_df[['ItemName', 'Category', 'TotalAmount', 'CumPerc']], height=500)
+        st.markdown("### The 80% Contribution Breakdown")
+        st.dataframe(
+            pareto_df,
+            column_config={
+                "CatContrib": st.column_config.NumberColumn("Category Share %", format="%.2f%%"),
+                "ItemContrib": st.column_config.NumberColumn("Item Share % (Global)", format="%.2f%%"),
+                "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"),
+            },
+            hide_index=True,
+            height=600,
+            use_container_width=True
+        )
 
     # --- TAB 3: TIME SERIES ---
     with tab3:
-        st.header("📅 Daily Trends")
-        plot_time_series_top5(df)
+        st.header("📅 Daily Trends (Fixed Scales)")
+        st.caption("Red labels show the average daily sales for that item.")
+        plot_time_series_fixed(df)
 
-    # --- TAB 4: BASKET & CORR ---
+    # --- TAB 4: BASKET ANALYSIS ---
     with tab4:
-        st.header("🛒 Basket & Correlations")
-        b1, b2 = st.columns(2)
-        with b1:
-            st.subheader("Item Combos (>60%)")
-            st.dataframe(get_basket_rules(df, 'ItemName', 0.6))
-        with b2:
-            st.subheader("Category Combos (>60%)")
-            st.dataframe(get_basket_rules(df, 'Category', 0.6))
+        st.header("🍔 Smart Combo Builder")
+        st.caption("Sorted by 'Lift'. Lift > 2.0 is a very strong connection.")
         
-        st.divider()
-        if st.checkbox("Show Correlation Heatmap"):
-            st.pyplot(correlation_heatmap(df, 'Category'))
+        combos = advanced_basket_analysis(df)
+        if not combos.empty:
+            st.dataframe(
+                combos,
+                column_config={
+                    "lift": st.column_config.NumberColumn("Lift Strength", format="%.2f"),
+                    "confidence": st.column_config.NumberColumn("Probability", format="%.2f"),
+                },
+                hide_index=True,
+                use_container_width=True
+            )
+        else:
+            st.warning("Not enough transaction overlap found.")
 
     # --- TAB 5: FORECAST ---
     with tab5:
-        st.header("🔮 Demand Forecast (30 Days)")
-        forecast_df = forecast_demand(df)
-        sel_cat = st.selectbox("Select Category", df['Category'].unique())
-        cat_items = df[df['Category'] == sel_cat]['ItemName'].unique()
-        subset = forecast_df[forecast_df['ItemName'].isin(cat_items)]
-        if not subset.empty:
-            st.dataframe(subset.pivot(index='ItemName', columns='Date', values='Predicted_Qty'))
+        st.header("🔮 Demand Prediction (Next Month)")
+        st.markdown("**Model:** Holt-Winters Exponential Smoothing (Detects seasonality).")
+        st.markdown("Showing **Total Expected Quantity** for the next 30 days.")
+        
+        with st.spinner("Training Statistical Models... (This takes a moment)"):
+            forecast_data = advanced_forecast(df)
+            
+        if not forecast_data.empty:
+            # Pivot for cleaner view
+            st.dataframe(
+                forecast_data.sort_values(['Category', 'Total Predicted Demand (Next 30 Days)'], ascending=[True, False]),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.error("Not enough historical data to train the model (Need at least 14 days).")
 
     # --- TAB 6: AI CHAT ---
     with tab6:
-        st.subheader("🤖 Chat with Manager")
+        st.subheader("🤖 Manager Chat")
         if "messages" not in st.session_state: st.session_state.messages = []
         for msg in st.session_state.messages: st.chat_message(msg["role"]).write(msg["content"])
-        if prompt := st.chat_input("Ask about data..."):
+        if prompt := st.chat_input("Ask about the new forecast..."):
             st.chat_message("user").write(prompt)
             st.session_state.messages.append({"role": "user", "content": prompt})
             try:
                 llm = ChatOpenAI(model="gpt-4o-mini", api_key=st.secrets["OPENAI_API_KEY"])
-                response = llm.invoke([SystemMessage(content="Restaurant Analyst"), HumanMessage(content=f"Data: Rev {rev}. Q: {prompt}")])
+                response = llm.invoke([SystemMessage(content="Restaurant Analyst"), HumanMessage(content=prompt)])
                 st.chat_message("assistant").write(response.content)
                 st.session_state.messages.append({"role": "assistant", "content": response.content})
             except: st.error("Check API Key")
