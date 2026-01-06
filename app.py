@@ -15,7 +15,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 5.2", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 5.3", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -63,16 +63,26 @@ def get_star_items_with_hours(df):
     item_stats = item_stats.sort_values('TotalAmount', ascending=False).head(20)
     
     peak_hours_list = []
+    peak_qty_list = [] # REQ 2: New list for qty
+    
     for item in item_stats['ItemName']:
         item_data = df[df['ItemName'] == item]
         if 'Hour' in df.columns and not item_data.empty:
-            peak = item_data.groupby('Hour')['Quantity'].sum().idxmax()
-            peak_str = f"{int(peak):02d}:00 - {int(peak)+1:02d}:00"
+            # Group by hour and sum quantity
+            hour_grouped = item_data.groupby('Hour')['Quantity'].sum()
+            peak_hour = hour_grouped.idxmax()
+            peak_q = hour_grouped.max()
+            
+            peak_str = f"{int(peak_hour):02d}:00 - {int(peak_hour)+1:02d}:00"
         else:
             peak_str = "N/A"
+            peak_q = 0
+            
         peak_hours_list.append(peak_str)
+        peak_qty_list.append(peak_q)
         
     item_stats['Peak Selling Hour'] = peak_hours_list
+    item_stats['Qty Sold (Peak)'] = peak_qty_list # REQ 2: Add column
     return item_stats
 
 def get_contribution_lists(df):
@@ -137,15 +147,14 @@ def plot_time_series_fixed(df):
         for item in top_items:
             avg_val = daily[daily['ItemName'] == item]['Quantity'].mean()
             fig.add_hline(y=avg_val, line_dash="dot", line_color="grey", opacity=0.5)
-            # FIX 1: Show Item Name in the annotation so you know which line is which
             fig.add_annotation(
                 x=daily['Date'].max(), y=avg_val, 
                 text=f"{item}: {avg_val:.1f}", 
                 showarrow=False, yshift=10, font=dict(color="red", size=10)
             )
             
-        # FIX 2: Alternate Day X-Axis (Every 2 days)
-        fig.update_xaxes(dtick="D2", tickformat="%d %b")
+        # REQ 4: Show Day + Date in X-Axis (e.g., "05 Jan (Mon)")
+        fig.update_xaxes(dtick="D2", tickformat="%d %b (%a)")
         fig.update_yaxes(matches=None, showticklabels=True)
         st.plotly_chart(fig, use_container_width=True)
 
@@ -163,8 +172,6 @@ def advanced_basket_analysis(df):
     rules['antecedents'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['consequents'] = rules['consequents'].apply(lambda x: list(x)[0])
     
-    # FIX 3: Remove Duplicate Combos (A->B and B->A are the same for combos)
-    # We create a sorted tuple of the pair, then drop duplicates based on that pair
     rules['combo_pair'] = rules.apply(lambda x: tuple(sorted([x['antecedents'], x['consequents']])), axis=1)
     rules = rules.drop_duplicates(subset='combo_pair')
     
@@ -193,7 +200,7 @@ def advanced_forecast(df):
     return pd.DataFrame(forecast_results)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 5.2")
+st.title("📊 Mithas Restaurant Intelligence 5.3")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data", type=['xlsx'])
 
 if uploaded_file:
@@ -219,7 +226,11 @@ if uploaded_file:
             st.subheader("⌚ Peak Hours Graph")
             if 'Hour' in df.columns:
                 hourly = df.groupby('Hour')['TotalAmount'].sum().reset_index()
-                st.bar_chart(hourly.set_index('Hour'))
+                # REQ 1: Use Plotly Bar Chart to allow Average Line
+                fig_hourly = px.bar(hourly, x='Hour', y='TotalAmount')
+                avg_hourly = hourly['TotalAmount'].mean()
+                fig_hourly.add_hline(y=avg_hourly, line_dash="dash", line_color="red", annotation_text=f"Avg: ₹{avg_hourly:,.0f}", annotation_position="top right")
+                st.plotly_chart(fig_hourly, use_container_width=True)
             else: st.warning("No Time data found.")
         with g2:
             st.subheader("📅 Peak Days Graph")
@@ -236,7 +247,8 @@ if uploaded_file:
         with l2:
             st.subheader("💰 High Revenue Days")
             top_days = df.groupby('Date')['TotalAmount'].sum().sort_values(ascending=False).head(5).reset_index()
-            top_days['Date'] = top_days['Date'].dt.date
+            # REQ 3: Show Day Name along with Date
+            top_days['Date'] = top_days['Date'].dt.strftime('%Y-%m-%d (%A)')
             st.dataframe(top_days, hide_index=True, use_container_width=True)
         st.divider()
 
@@ -252,7 +264,13 @@ if uploaded_file:
 
         st.subheader("⭐ Top 20 Star Items & Selling Hours")
         star_df = get_star_items_with_hours(df)
-        st.dataframe(star_df, column_config={"TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"), "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%", min_value=0, max_value=star_df['Contribution %'].max()), "Peak Selling Hour": st.column_config.TextColumn("Peak Hour Window")}, hide_index=True, use_container_width=True)
+        # REQ 2: Added "Qty Sold (Peak)" column to config
+        st.dataframe(star_df, column_config={
+            "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"), 
+            "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%", min_value=0, max_value=star_df['Contribution %'].max()), 
+            "Peak Selling Hour": st.column_config.TextColumn("Peak Hour Window"),
+            "Qty Sold (Peak)": st.column_config.NumberColumn("Qty in Peak Hour")
+        }, hide_index=True, use_container_width=True)
 
     with tab2:
         st.header("🏆 Pareto Analysis")
