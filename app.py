@@ -15,7 +15,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 5.3", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 5.4", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -63,16 +63,14 @@ def get_star_items_with_hours(df):
     item_stats = item_stats.sort_values('TotalAmount', ascending=False).head(20)
     
     peak_hours_list = []
-    peak_qty_list = [] # REQ 2: New list for qty
+    peak_qty_list = []
     
     for item in item_stats['ItemName']:
         item_data = df[df['ItemName'] == item]
         if 'Hour' in df.columns and not item_data.empty:
-            # Group by hour and sum quantity
             hour_grouped = item_data.groupby('Hour')['Quantity'].sum()
             peak_hour = hour_grouped.idxmax()
             peak_q = hour_grouped.max()
-            
             peak_str = f"{int(peak_hour):02d}:00 - {int(peak_hour)+1:02d}:00"
         else:
             peak_str = "N/A"
@@ -82,20 +80,17 @@ def get_star_items_with_hours(df):
         peak_qty_list.append(peak_q)
         
     item_stats['Peak Selling Hour'] = peak_hours_list
-    item_stats['Qty Sold (Peak)'] = peak_qty_list # REQ 2: Add column
+    item_stats['Qty Sold (Peak)'] = peak_qty_list
     return item_stats
 
 def get_contribution_lists(df):
     total_rev = df['TotalAmount'].sum()
-    
     cat_df = df.groupby('Category')['TotalAmount'].sum().reset_index()
     cat_df['Contribution'] = (cat_df['TotalAmount'] / total_rev) * 100
     cat_df = cat_df.sort_values('TotalAmount', ascending=False)
-    
     item_df = df.groupby(['Category', 'ItemName'])['TotalAmount'].sum().reset_index()
     item_df['Contribution'] = (item_df['TotalAmount'] / total_rev) * 100
     item_df = item_df.sort_values(['Category', 'TotalAmount'], ascending=[True, False])
-    
     return cat_df, item_df
 
 def analyze_peak_hour_items(df):
@@ -143,17 +138,11 @@ def plot_time_series_fixed(df):
         if daily.empty: continue
         
         fig = px.line(daily, x='Date', y='Quantity', color='ItemName', markers=True)
-        
         for item in top_items:
             avg_val = daily[daily['ItemName'] == item]['Quantity'].mean()
             fig.add_hline(y=avg_val, line_dash="dot", line_color="grey", opacity=0.5)
-            fig.add_annotation(
-                x=daily['Date'].max(), y=avg_val, 
-                text=f"{item}: {avg_val:.1f}", 
-                showarrow=False, yshift=10, font=dict(color="red", size=10)
-            )
+            fig.add_annotation(x=daily['Date'].max(), y=avg_val, text=f"{item}: {avg_val:.1f}", showarrow=False, yshift=10, font=dict(color="red", size=10))
             
-        # REQ 4: Show Day + Date in X-Axis (e.g., "05 Jan (Mon)")
         fig.update_xaxes(dtick="D2", tickformat="%d %b (%a)")
         fig.update_yaxes(matches=None, showticklabels=True)
         st.plotly_chart(fig, use_container_width=True)
@@ -200,14 +189,15 @@ def advanced_forecast(df):
     return pd.DataFrame(forecast_results)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 5.3")
+st.title("📊 Mithas Restaurant Intelligence 5.4")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data", type=['xlsx'])
 
 if uploaded_file:
     df = load_data(uploaded_file)
     
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "Overview", "Pareto (Visual)", "Time Series", "Smart Combos", "Demand Forecast", "AI Chat"
+    # REQ: Added "Category Details" Tab
+    tab1, tab_cat, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "Overview", "Category Details", "Pareto (Visual)", "Time Series", "Smart Combos", "Demand Forecast", "AI Chat"
     ])
 
     with tab1:
@@ -226,10 +216,11 @@ if uploaded_file:
             st.subheader("⌚ Peak Hours Graph")
             if 'Hour' in df.columns:
                 hourly = df.groupby('Hour')['TotalAmount'].sum().reset_index()
-                # REQ 1: Use Plotly Bar Chart to allow Average Line
                 fig_hourly = px.bar(hourly, x='Hour', y='TotalAmount')
                 avg_hourly = hourly['TotalAmount'].mean()
                 fig_hourly.add_hline(y=avg_hourly, line_dash="dash", line_color="red", annotation_text=f"Avg: ₹{avg_hourly:,.0f}", annotation_position="top right")
+                # REQ 1: Force X-axis to show all hours
+                fig_hourly.update_xaxes(tickmode='linear', dtick=1)
                 st.plotly_chart(fig_hourly, use_container_width=True)
             else: st.warning("No Time data found.")
         with g2:
@@ -247,7 +238,6 @@ if uploaded_file:
         with l2:
             st.subheader("💰 High Revenue Days")
             top_days = df.groupby('Date')['TotalAmount'].sum().sort_values(ascending=False).head(5).reset_index()
-            # REQ 3: Show Day Name along with Date
             top_days['Date'] = top_days['Date'].dt.strftime('%Y-%m-%d (%A)')
             st.dataframe(top_days, hide_index=True, use_container_width=True)
         st.divider()
@@ -264,13 +254,55 @@ if uploaded_file:
 
         st.subheader("⭐ Top 20 Star Items & Selling Hours")
         star_df = get_star_items_with_hours(df)
-        # REQ 2: Added "Qty Sold (Peak)" column to config
         st.dataframe(star_df, column_config={
             "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"), 
             "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%", min_value=0, max_value=star_df['Contribution %'].max()), 
             "Peak Selling Hour": st.column_config.TextColumn("Peak Hour Window"),
             "Qty Sold (Peak)": st.column_config.NumberColumn("Qty in Peak Hour")
         }, hide_index=True, use_container_width=True)
+    
+    # REQ 2: NEW TAB FOR CATEGORY DETAILS
+    with tab_cat:
+        st.header("📂 Category Deep-Dive")
+        st.markdown("Detailed breakdown of items per category, units sold, and contribution.")
+        
+        cats = df['Category'].unique()
+        total_business_rev = df['TotalAmount'].sum()
+        
+        for cat in cats:
+            st.subheader(f"🔹 {cat}")
+            cat_data = df[df['Category'] == cat]
+            
+            # Group by item to get the stats
+            cat_stats = cat_data.groupby('ItemName').agg({
+                'TotalAmount': 'sum',
+                'Quantity': 'sum'
+            }).reset_index()
+            
+            # Calculate Contribution to TOTAL Revenue (as requested in text)
+            cat_stats['Contribution %'] = (cat_stats['TotalAmount'] / total_business_rev) * 100
+            
+            # Sort by Revenue
+            cat_stats = cat_stats.sort_values('TotalAmount', ascending=False)
+            
+            # Display Table matching image structure
+            st.dataframe(
+                cat_stats,
+                column_config={
+                    "ItemName": "Item Name",
+                    "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"),
+                    "Quantity": st.column_config.NumberColumn("Units Sold"),
+                    "Contribution %": st.column_config.ProgressColumn(
+                        "Contribution to Total Rev", 
+                        format="%.2f%%", 
+                        min_value=0, 
+                        max_value=100
+                    )
+                },
+                hide_index=True,
+                use_container_width=True
+            )
+            st.divider()
 
     with tab2:
         st.header("🏆 Pareto Analysis")
