@@ -15,7 +15,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 6.0", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 7.0", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -44,15 +44,14 @@ def load_data(file):
     return df
 
 # --- HELPER: PEAK HOUR FINDER ---
-def get_peak_hour_for_pair(df, item_a, item_b, level='ItemName'):
+def get_peak_hour_for_pair(df, item_a, item_b):
     # Find orders containing both A and B
-    orders_a = set(df[df[level] == item_a]['OrderID'])
-    orders_b = set(df[df[level] == item_b]['OrderID'])
+    orders_a = set(df[df['ItemName'] == item_a]['OrderID'])
+    orders_b = set(df[df['ItemName'] == item_b]['OrderID'])
     common_orders = list(orders_a.intersection(orders_b))
     
     if not common_orders: return "N/A"
     
-    # Get hours for these orders
     subset = df[df['OrderID'].isin(common_orders)]
     if 'Hour' not in subset.columns: return "N/A"
     
@@ -62,68 +61,60 @@ def get_peak_hour_for_pair(df, item_a, item_b, level='ItemName'):
         return f"{p:02d}:00 - {p+1:02d}:00"
     return "N/A"
 
-# --- PART 1, 2, 3 COMBO LOGIC ---
+# --- COMBO LOGIC (REBUILT) ---
 
-def get_category_combos_part1(df):
-    """Part 1: Category vs Category"""
-    # Basket at Category Level
-    basket = (df.groupby(['OrderID', 'Category'])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID'))
-    basket_sets = basket.applymap(lambda x: 1 if x > 0 else 0)
-    
-    frequent = apriori(basket_sets, min_support=0.01, use_colnames=True)
-    if frequent.empty: return pd.DataFrame()
-    
-    rules = association_rules(frequent, metric="lift", min_threshold=1.1)
-    rules['Category A'] = rules['antecedents'].apply(lambda x: list(x)[0])
-    rules['Category B'] = rules['consequents'].apply(lambda x: list(x)[0])
-    
-    # Deduplicate
-    rules['pair'] = rules.apply(lambda x: tuple(sorted([x['Category A'], x['Category B']])), axis=1)
-    rules = rules.drop_duplicates(subset='pair')
-    
-    # Calculate Peak Hour & Frequency
-    rules['Peak Hour'] = rules.apply(lambda x: get_peak_hour_for_pair(df, x['Category A'], x['Category B'], 'Category'), axis=1)
-    # Approx frequency based on support
-    total_orders = df['OrderID'].nunique()
-    rules['Times Sold Together'] = (rules['support'] * total_orders).astype(int)
-    
-    return rules[['Category A', 'Category B', 'Times Sold Together', 'Peak Hour', 'lift', 'confidence']]
-
-def get_fixed_category_part2(df):
-    """Part 2: Fixed Category A vs Variable Category B (Item Level)"""
-    # 1. Get Item Rules
+def get_combo_analysis_full(df):
+    """Generates the Master Rules Table for all parts"""
+    # 1. Basket Analysis at ITEM Level
     basket = (df.groupby(['OrderID', 'ItemName'])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID'))
     basket_sets = basket.applymap(lambda x: 1 if x > 0 else 0)
-    frequent = apriori(basket_sets, min_support=0.005, use_colnames=True)
-    if frequent.empty: return {}, []
     
-    rules = association_rules(frequent, metric="lift", min_threshold=1.1)
+    # Low support to catch hidden gems
+    frequent = apriori(basket_sets, min_support=0.005, use_colnames=True)
+    if frequent.empty: return pd.DataFrame()
+    
+    rules = association_rules(frequent, metric="lift", min_threshold=1.05)
+    
+    # 2. Extract Names
     rules['Item A'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['Item B'] = rules['consequents'].apply(lambda x: list(x)[0])
     
-    # 2. Map Items to Categories
+    # 3. Deduplicate (A+B is same as B+A)
+    rules['pair'] = rules.apply(lambda x: tuple(sorted([x['Item A'], x['Item B']])), axis=1)
+    rules = rules.drop_duplicates(subset='pair')
+    
+    # 4. Map Categories
     item_cat_map = df.set_index('ItemName')['Category'].to_dict()
-    rules['Cat A'] = rules['Item A'].map(item_cat_map)
-    rules['Cat B'] = rules['Item B'].map(item_cat_map)
+    rules['Category A'] = rules['Item A'].map(item_cat_map)
+    rules['Category B'] = rules['Item B'].map(item_cat_map)
     
-    # 3. Filter: Cross-Category Only (A != B)
-    cross_cat_rules = rules[rules['Cat A'] != rules['Cat B']].copy()
+    # 5. Create "Item Pair" String
+    rules['Specific Item Combo'] = rules['Item A'] + " + " + rules['Item B']
     
-    # 4. Calculate Details
+    # 6. Calculate Metrics
     total_orders = df['OrderID'].nunique()
-    cross_cat_rules['Times Sold'] = (cross_cat_rules['support'] * total_orders).astype(int)
-    cross_cat_rules['Peak Hour'] = cross_cat_rules.apply(lambda x: get_peak_hour_for_pair(df, x['Item A'], x['Item B'], 'ItemName'), axis=1)
+    rules['Times Sold Together'] = (rules['support'] * total_orders).astype(int)
+    rules['Peak Hour'] = rules.apply(lambda x: get_peak_hour_for_pair(df, x['Item A'], x['Item B']), axis=1)
     
-    return cross_cat_rules
+    return rules
 
-def get_top_10_combos_part3(df, rules_df):
-    """Part 3: Top 10 Actionable Combos"""
-    if rules_df is None or rules_df.empty: return pd.DataFrame()
+def get_part3_strategy(rules_df):
+    """Segments combos into 'Proven' vs 'Potential'"""
+    if rules_df.empty: return pd.DataFrame(), pd.DataFrame()
     
-    # Sort by Lift (Strength) and Times Sold (Popularity)
-    top_10 = rules_df.sort_values(['lift', 'Times Sold'], ascending=[False, False]).head(10).copy()
+    # STRATEGY 1: PROVEN WINNERS (High Frequency)
+    # High support, decent lift. These are your cash cows.
+    proven = rules_df.sort_values('Times Sold Together', ascending=False).head(10).copy()
+    proven['Strategy'] = "Bundle & Upsell (Proven Demand)"
     
-    return top_10[['Item A', 'Item B', 'Times Sold', 'Peak Hour']]
+    # STRATEGY 2: HIDDEN GEMS (High Potential)
+    # High Lift (>1.5) but Lower Frequency. People love them, but rarely find them.
+    # We filter for items that aren't already in the "Proven" top 10 to avoid duplicates
+    potential = rules_df[~rules_df.index.isin(proven.index)]
+    potential = potential[potential['lift'] > 1.5].sort_values('lift', ascending=False).head(10).copy()
+    potential['Strategy'] = "Market Aggressively (High Compatibility)"
+    
+    return proven, potential
 
 # --- ANALYTICS MODULES (EXISTING) ---
 def get_overview_metrics(df):
@@ -234,23 +225,8 @@ def advanced_forecast(df):
     return pd.DataFrame(forecast_results)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 6.0")
+st.title("📊 Mithas Restaurant Intelligence 7.0")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data", type=['xlsx'])
-
-# --- SIDEBAR: LAYOUT CUSTOMIZER ---
-st.sidebar.divider()
-st.sidebar.subheader("🛠️ Customize Layout")
-overview_order = st.sidebar.multiselect(
-    "Reorder Overview Tab",
-    ["Metrics", "Graphs", "Peak Items List", "Contributions", "Star Items"],
-    default=["Metrics", "Graphs", "Peak Items List", "Contributions", "Star Items"]
-)
-
-combo_order = st.sidebar.multiselect(
-    "Reorder Smart Combos Tab",
-    ["Part 1: Category Level", "Part 2: Fixed Category Analysis", "Part 3: Top 10 Recommendations"],
-    default=["Part 1: Category Level", "Part 2: Fixed Category Analysis", "Part 3: Top 10 Recommendations"]
-)
 
 if uploaded_file:
     df = load_data(uploaded_file)
@@ -259,11 +235,19 @@ if uploaded_file:
         "Overview", "Category Details", "Pareto (Visual)", "Time Series", "Smart Combos", "Demand Forecast", "AI Chat"
     ])
 
-    # --- TAB 1: OVERVIEW (MANUAL ORDER) ---
+    # --- TAB 1: OVERVIEW (WITH MANUAL ORDERING) ---
     with tab1:
         st.header("🏢 Business Overview")
         
-        # Define the blocks
+        # MANUAL REORDERING WIDGET (Replaces Sidebar)
+        with st.expander("🛠️ Reorder Page Layout (Drag tags to change display order)", expanded=False):
+            overview_order = st.multiselect(
+                "Select order of sections:",
+                ["Metrics", "Graphs", "Peak Items List", "Contributions", "Star Items"],
+                default=["Metrics", "Graphs", "Peak Items List", "Contributions", "Star Items"]
+            )
+
+        # Define Blocks
         def render_metrics():
             rev, orders, avg_day, avg_week, aov = get_overview_metrics(df)
             c1, c2, c3, c4, c5 = st.columns(5)
@@ -327,19 +311,10 @@ if uploaded_file:
                 "Qty Sold (Peak)": st.column_config.NumberColumn("Qty in Peak Hour")
             }, hide_index=True, use_container_width=True)
 
-        # Map string to function
-        block_map = {
-            "Metrics": render_metrics,
-            "Graphs": render_graphs,
-            "Peak Items List": render_peak_list,
-            "Contributions": render_contributions,
-            "Star Items": render_star_items
-        }
-
-        # Render based on user selection
+        # Render Logic
+        block_map = {"Metrics": render_metrics, "Graphs": render_graphs, "Peak Items List": render_peak_list, "Contributions": render_contributions, "Star Items": render_star_items}
         for block_name in overview_order:
-            if block_name in block_map:
-                block_map[block_name]()
+            if block_name in block_map: block_map[block_name]()
 
     # --- TAB: CATEGORY DETAILS (UNCHANGED) ---
     with tab_cat:
@@ -367,62 +342,57 @@ if uploaded_file:
         st.header("📅 Daily Trends")
         plot_time_series_fixed(df)
 
-    # --- TAB 4: SMART COMBOS (NEW 3-PART STRUCTURE + MANUAL ORDER) ---
+    # --- TAB 4: SMART COMBOS (REBUILT) ---
     with tab4:
         st.header("🍔 Smart Combo Strategy")
         
-        # Pre-calculate data
-        cat_combos_df = get_category_combos_part1(df)
-        item_rules_df = get_fixed_category_part2(df)
-        top10_df = get_top_10_combos_part3(df, item_rules_df)
+        # Reorder Widget
+        with st.expander("🛠️ Reorder Combo Layout"):
+            combo_order = st.multiselect("Section Order", ["Part 1: Full Combo Map", "Part 3: Strategic Recommendations"], default=["Part 1: Full Combo Map", "Part 3: Strategic Recommendations"])
+
+        # Calculate Data
+        rules_df = get_combo_analysis_full(df)
+        proven_df, potential_df = get_part3_strategy(rules_df)
 
         def render_part1():
-            st.subheader("1️⃣ Part 1: Category vs Category Analysis")
-            st.markdown("Which broad categories sell together? (e.g., Sweets + Snacks)")
-            if not cat_combos_df.empty:
-                st.dataframe(cat_combos_df, column_config={
-                    "lift": st.column_config.NumberColumn("Lift (Strength)", format="%.2f"),
-                    "confidence": st.column_config.NumberColumn("Probability", format="%.2f"),
-                    "Times Sold Together": st.column_config.NumberColumn("Frequency")
-                }, hide_index=True, use_container_width=True)
-            else: st.warning("No category correlations found.")
-            st.divider()
-
-        def render_part2():
-            st.subheader("2️⃣ Part 2: Fixed Category Drill-Down")
-            st.markdown("Select a 'Fixed' Category to see what *else* people buy with it.")
-            
-            fixed_cat = st.selectbox("Select Fixed Category (Category A)", df['Category'].unique())
-            
-            if not item_rules_df.empty:
-                # Filter for Cat A = Selected
-                subset = item_rules_df[item_rules_df['Cat A'] == fixed_cat].sort_values('lift', ascending=False)
-                
-                if not subset.empty:
-                    st.dataframe(subset[['Cat A', 'Cat B', 'Item A', 'Item B', 'Times Sold', 'Peak Hour']], 
-                                 hide_index=True, use_container_width=True)
-                else:
-                    st.info(f"No strong cross-category combos found starting with {fixed_cat}.")
-            else: st.warning("Not enough data for drill-down.")
+            st.subheader("1️⃣ Part 1: Full Category + Item Combo Map")
+            st.markdown("Shows exactly which item (from Category A) is bought with which item (from Category B).")
+            if not rules_df.empty:
+                # Filter for cross-category and meaningful lift
+                display_cols = ['Category A', 'Category B', 'Specific Item Combo', 'Times Sold Together', 'Peak Hour', 'lift']
+                st.dataframe(rules_df[display_cols].sort_values('Times Sold Together', ascending=False), 
+                             column_config={
+                                 "Specific Item Combo": st.column_config.TextColumn("Item A + Item B", width="medium"),
+                                 "lift": st.column_config.NumberColumn("Lift Strength", format="%.2f"),
+                             },
+                             hide_index=True, use_container_width=True)
+            else: st.warning("No significant combos found.")
             st.divider()
 
         def render_part3():
-            st.subheader("3️⃣ Part 3: Top 10 'Golden Combos'")
-            st.markdown("The absolute best pairs to upsell right now.")
-            if not top10_df.empty:
-                st.dataframe(top10_df, hide_index=True, use_container_width=True)
-            else: st.info("No top combos identified.")
+            st.subheader("3️⃣ Part 3: Strategic Recommendations")
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown("#### 🔥 Proven Winners (High Volume)")
+                st.caption("These pairs are already popular. **Action:** Create an official 'Bundle' on the menu to speed up ordering.")
+                if not proven_df.empty:
+                    st.dataframe(proven_df[['Specific Item Combo', 'Times Sold Together', 'Peak Hour']], hide_index=True, use_container_width=True)
+                else: st.info("No data.")
+            
+            with c2:
+                st.markdown("#### 💎 Hidden Gems (High Potential)")
+                st.caption("These pairs have strong chemistry (Lift > 1.5) but low sales. **Action:** Promote these actively to unlock new revenue.")
+                if not potential_df.empty:
+                    st.dataframe(potential_df[['Specific Item Combo', 'lift', 'Peak Hour']], 
+                                 column_config={"lift": st.column_config.NumberColumn("Compatibility Score", format="%.2f")},
+                                 hide_index=True, use_container_width=True)
+                else: st.info("No hidden gems found yet.")
             st.divider()
 
-        combo_map = {
-            "Part 1: Category Level": render_part1,
-            "Part 2: Fixed Category Analysis": render_part2,
-            "Part 3: Top 10 Recommendations": render_part3
-        }
-
-        for section in combo_order:
-            if section in combo_map:
-                combo_map[section]()
+        combo_map = {"Part 1: Full Combo Map": render_part1, "Part 3: Strategic Recommendations": render_part3}
+        for block in combo_order:
+            if block in combo_map: combo_map[block]()
 
     # --- TABS 5 & 6 (UNCHANGED) ---
     with tab5:
