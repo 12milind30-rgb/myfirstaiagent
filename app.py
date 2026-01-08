@@ -15,7 +15,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 7.1 Fixed", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 7.2", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -208,7 +208,7 @@ def advanced_forecast(df):
     return pd.DataFrame(forecast_results)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 7.1")
+st.title("📊 Mithas Restaurant Intelligence 7.2")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data", type=['xlsx'])
 
 if uploaded_file:
@@ -218,7 +218,7 @@ if uploaded_file:
         "Overview", "Category Details", "Pareto (Visual)", "Time Series", "Smart Combos", "Demand Forecast", "AI Chat"
     ])
 
-    # --- TAB 1: OVERVIEW (FIXED) ---
+    # --- TAB 1: OVERVIEW (VISUALLY UPGRADED) ---
     with tab1:
         st.header("🏢 Business Overview")
         with st.expander("🛠️ Reorder Page Layout", expanded=False):
@@ -259,21 +259,38 @@ if uploaded_file:
 
         def render_hourly_details():
             st.subheader("🕰️ Hourly Sales Breakdown (9:00 AM - 11:00 PM)")
-            st.caption("Detailed breakdown of every item sold in each hour block.")
+            st.caption("Click on an hour to see detailed item sales.")
+            
             hourly_df = get_hourly_details(df)
+            
             if not hourly_df.empty:
-                st.dataframe(
-                    hourly_df,
-                    column_config={
-                        "Time Slot": st.column_config.TextColumn("Hour", width="medium"),
-                        "ItemName": "Item Name",
-                        "Quantity": st.column_config.NumberColumn("Units Sold"),
-                        "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")
-                    },
-                    hide_index=True,
-                    use_container_width=True,
-                    height=500
-                )
+                time_slots = hourly_df['Time Slot'].unique()
+                for slot in time_slots:
+                    # Filter data for this specific hour
+                    slot_data = hourly_df[hourly_df['Time Slot'] == slot]
+                    
+                    # Calculate summary stats for the Header
+                    total_rev_slot = slot_data['TotalAmount'].sum()
+                    total_qty_slot = slot_data['Quantity'].sum()
+                    top_item_slot = slot_data.iloc[0]['ItemName']
+                    
+                    # Create the Collapsible Expander
+                    with st.expander(f"⏰ {slot}  |  Revenue: ₹{total_rev_slot:,.0f}  |  Units: {total_qty_slot}  |  Top: {top_item_slot}"):
+                        st.dataframe(
+                            slot_data[['ItemName', 'Quantity', 'TotalAmount']],
+                            column_config={
+                                "ItemName": "Item Name",
+                                "Quantity": st.column_config.ProgressColumn(
+                                    "Units Sold", 
+                                    format="%d", 
+                                    min_value=0, 
+                                    max_value=int(hourly_df['Quantity'].max())
+                                ),
+                                "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")
+                            },
+                            hide_index=True,
+                            use_container_width=True
+                        )
             else:
                 st.info("No sales data found between 9 AM and 11 PM.")
             st.divider()
