@@ -1,9 +1,8 @@
-dash
-dash-bootstrap-components
+streamlit
 pandas
 plotly
-openpyxl
 mlxtend
+openpyxl
 openai
 langchain
 langchain-core
@@ -13,4 +12,3 @@ scikit-learn
 matplotlib
 seaborn
 statsmodels
-gunicorn
