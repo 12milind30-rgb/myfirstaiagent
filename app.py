@@ -15,7 +15,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 7.0", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 7.1", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -43,73 +43,69 @@ def load_data(file):
             df['Hour'] = 0
     return df
 
-# --- HELPER: PEAK HOUR FINDER ---
+# --- HELPER FUNCTIONS ---
+
 def get_peak_hour_for_pair(df, item_a, item_b):
-    # Find orders containing both A and B
     orders_a = set(df[df['ItemName'] == item_a]['OrderID'])
     orders_b = set(df[df['ItemName'] == item_b]['OrderID'])
     common_orders = list(orders_a.intersection(orders_b))
-    
     if not common_orders: return "N/A"
-    
     subset = df[df['OrderID'].isin(common_orders)]
     if 'Hour' not in subset.columns: return "N/A"
-    
     peak = subset['Hour'].mode()
     if not peak.empty:
         p = int(peak[0])
         return f"{p:02d}:00 - {p+1:02d}:00"
     return "N/A"
 
+def get_hourly_details(df):
+    """Filters data for 9 AM - 11 PM and aggregates items"""
+    if 'Hour' not in df.columns: return pd.DataFrame()
+    
+    # Filter 9 AM (9) to 11 PM (23)
+    mask = (df['Hour'] >= 9) & (df['Hour'] <= 23)
+    filtered = df[mask].copy()
+    
+    # Group by Hour and Item
+    hourly_stats = filtered.groupby(['Hour', 'ItemName']).agg({
+        'Quantity': 'sum',
+        'TotalAmount': 'sum'
+    }).reset_index()
+    
+    # Format Hour String (e.g., "09:00 - 10:00")
+    hourly_stats['Time Slot'] = hourly_stats['Hour'].apply(lambda h: f"{int(h):02d}:00 - {int(h)+1:02d}:00")
+    
+    # Sort by Hour then by Quantity (High to Low)
+    hourly_stats = hourly_stats.sort_values(['Hour', 'Quantity'], ascending=[True, False])
+    
+    return hourly_stats[['Time Slot', 'ItemName', 'Quantity', 'TotalAmount']]
+
 # --- COMBO LOGIC ---
 
 def get_combo_analysis_full(df):
-    """Generates the Master Rules Table for all parts"""
-    # 1. Basket Analysis at ITEM Level
     basket = (df.groupby(['OrderID', 'ItemName'])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID'))
     basket_sets = basket.applymap(lambda x: 1 if x > 0 else 0)
-    
-    # Low support to catch hidden gems
     frequent = apriori(basket_sets, min_support=0.005, use_colnames=True)
     if frequent.empty: return pd.DataFrame()
-    
     rules = association_rules(frequent, metric="lift", min_threshold=1.05)
-    
-    # 2. Extract Names
     rules['Item A'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['Item B'] = rules['consequents'].apply(lambda x: list(x)[0])
-    
-    # 3. Deduplicate (A+B is same as B+A)
     rules['pair'] = rules.apply(lambda x: tuple(sorted([x['Item A'], x['Item B']])), axis=1)
     rules = rules.drop_duplicates(subset='pair')
-    
-    # 4. Map Categories
     item_cat_map = df.set_index('ItemName')['Category'].to_dict()
     rules['Category A'] = rules['Item A'].map(item_cat_map)
     rules['Category B'] = rules['Item B'].map(item_cat_map)
-    
-    # 5. Create "Item Pair" String
     rules['Specific Item Combo'] = rules['Item A'] + " + " + rules['Item B']
-    
-    # 6. Calculate Metrics
     total_orders = df['OrderID'].nunique()
     rules['Times Sold Together'] = (rules['support'] * total_orders).astype(int)
     rules['Peak Hour'] = rules.apply(lambda x: get_peak_hour_for_pair(df, x['Item A'], x['Item B']), axis=1)
-    
     return rules
 
 def get_part3_strategy(rules_df):
-    """Segments combos into 'Proven' vs 'Potential'"""
     if rules_df.empty: return pd.DataFrame(), pd.DataFrame()
-    
-    # STRATEGY 1: PROVEN WINNERS (High Frequency)
     proven = rules_df.sort_values('Times Sold Together', ascending=False).head(10).copy()
-    
-    # STRATEGY 2: HIDDEN GEMS (High Potential)
-    # Filter for items that aren't already in the "Proven" top 10
     potential = rules_df[~rules_df.index.isin(proven.index)]
     potential = potential[potential['lift'] > 1.5].sort_values('lift', ascending=False).head(10).copy()
-    
     return proven, potential
 
 # --- ANALYTICS MODULES (EXISTING) ---
@@ -221,7 +217,7 @@ def advanced_forecast(df):
     return pd.DataFrame(forecast_results)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 7.0")
+st.title("📊 Mithas Restaurant Intelligence 7.1")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data", type=['xlsx'])
 
 if uploaded_file:
@@ -231,16 +227,16 @@ if uploaded_file:
         "Overview", "Category Details", "Pareto (Visual)", "Time Series", "Smart Combos", "Demand Forecast", "AI Chat"
     ])
 
-    # --- TAB 1: OVERVIEW (WITH MANUAL ORDERING) ---
+    # --- TAB 1: OVERVIEW (WITH NEW TABLE) ---
     with tab1:
         st.header("🏢 Business Overview")
         
-        # MANUAL REORDERING WIDGET
+        # Updated Layout Manager to include "Hourly Breakdown"
         with st.expander("🛠️ Reorder Page Layout", expanded=False):
             overview_order = st.multiselect(
                 "Select order of sections:",
-                ["Metrics", "Graphs", "Peak Items List", "Contributions", "Star Items"],
-                default=["Metrics", "Graphs", "Peak Items List", "Contributions", "Star Items"]
+                ["Metrics", "Graphs", "Hourly Breakdown (9am-11pm)", "Peak Items List", "Contributions", "Star Items"],
+                default=["Metrics", "Graphs", "Hourly Breakdown (9am-11pm)", "Peak Items List", "Contributions", "Star Items"]
             )
 
         # Define Blocks
@@ -273,143 +269,18 @@ if uploaded_file:
                 st.bar_chart(daily_peak.set_index('DayOfWeek'))
             st.divider()
 
-        def render_peak_list():
-            l1, l2 = st.columns(2)
-            with l1:
-                peak_items_df, top_hrs = analyze_peak_hour_items(df)
-                st.subheader(f"🔥 Items Sold in Peak Hours {top_hrs}")
-                st.dataframe(peak_items_df, hide_index=True, use_container_width=True)
-            with l2:
-                st.subheader("💰 High Revenue Days")
-                top_days = df.groupby('Date')['TotalAmount'].sum().sort_values(ascending=False).head(5).reset_index()
-                top_days['Date'] = top_days['Date'].dt.strftime('%Y-%m-%d (%A)')
-                st.dataframe(top_days, hide_index=True, use_container_width=True)
-            st.divider()
-
-        def render_contributions():
-            cat_cont, item_cont = get_contribution_lists(df)
-            col_cat, col_item = st.columns(2)
-            with col_cat:
-                st.subheader("📂 Category Contribution %")
-                st.dataframe(cat_cont[['Category', 'TotalAmount', 'Contribution']], column_config={"Contribution": st.column_config.ProgressColumn("Share %", format="%.2f%%", min_value=0, max_value=100), "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")}, hide_index=True, use_container_width=True)
-            with col_item:
-                st.subheader("🍽️ Item Contribution (by Category)")
-                st.dataframe(item_cont[['Category', 'ItemName', 'TotalAmount', 'Contribution']], column_config={"Contribution": st.column_config.NumberColumn("Share %", format="%.2f%%"), "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")}, hide_index=True, height=400, use_container_width=True)
-            st.divider()
-
-        def render_star_items():
-            st.subheader("⭐ Top 20 Star Items & Selling Hours")
-            star_df = get_star_items_with_hours(df)
-            st.dataframe(star_df, column_config={
-                "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"), 
-                "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%", min_value=0, max_value=star_df['Contribution %'].max()), 
-                "Peak Selling Hour": st.column_config.TextColumn("Peak Hour Window"),
-                "Qty Sold (Peak)": st.column_config.NumberColumn("Qty in Peak Hour")
-            }, hide_index=True, use_container_width=True)
-
-        # Render Logic
-        block_map = {"Metrics": render_metrics, "Graphs": render_graphs, "Peak Items List": render_peak_list, "Contributions": render_contributions, "Star Items": render_star_items}
-        for block_name in overview_order:
-            if block_name in block_map: block_map[block_name]()
-
-    # --- TAB: CATEGORY DETAILS (UNCHANGED) ---
-    with tab_cat:
-        st.header("📂 Category Deep-Dive")
-        cats = df['Category'].unique()
-        total_business_rev = df['TotalAmount'].sum()
-        for cat in cats:
-            st.subheader(f"🔹 {cat}")
-            cat_data = df[df['Category'] == cat]
-            cat_stats = cat_data.groupby('ItemName').agg({'TotalAmount': 'sum', 'Quantity': 'sum'}).reset_index()
-            cat_stats['Contribution %'] = (cat_stats['TotalAmount'] / total_business_rev) * 100
-            cat_stats = cat_stats.sort_values('TotalAmount', ascending=False)
-            st.dataframe(cat_stats, column_config={"ItemName": "Item Name", "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"), "Quantity": st.column_config.NumberColumn("Units Sold"), "Contribution %": st.column_config.ProgressColumn("Contribution to Total Rev", format="%.2f%%", min_value=0, max_value=100)}, hide_index=True, use_container_width=True)
-            st.divider()
-
-    # --- TAB 2: PARETO (UNCHANGED) ---
-    with tab2:
-        st.header("🏆 Pareto Analysis")
-        pareto_df, ratio_msg, menu_perc = analyze_pareto_hierarchical(df)
-        st.info(f"💡 **Insight:** {ratio_msg} (Only {menu_perc:.1f}% of your menu!)")
-        st.dataframe(pareto_df, column_config={"CatContrib": st.column_config.NumberColumn("Category Share %", format="%.2f%%"), "ItemContrib": st.column_config.NumberColumn("Item Share % (Global)", format="%.2f%%"), "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")}, hide_index=True, height=600, use_container_width=True)
-
-    # --- TAB 3: TIME SERIES (UNCHANGED) ---
-    with tab3:
-        st.header("📅 Daily Trends")
-        plot_time_series_fixed(df)
-
-    # --- TAB 4: SMART COMBOS (REBUILT) ---
-    with tab4:
-        st.header("🍔 Smart Combo Strategy")
-        
-        # Reorder Widget
-        with st.expander("🛠️ Reorder Combo Layout"):
-            combo_order = st.multiselect("Section Order", ["Part 1: Full Combo Map", "Part 3: Strategic Recommendations"], default=["Part 1: Full Combo Map", "Part 3: Strategic Recommendations"])
-
-        # Calculate Data
-        rules_df = get_combo_analysis_full(df)
-        proven_df, potential_df = get_part3_strategy(rules_df)
-
-        def render_part1():
-            st.subheader("1️⃣ Part 1: Full Category + Item Combo Map")
-            st.markdown("Shows exactly which item (from Category A) is bought with which item (from Category B).")
-            if not rules_df.empty:
-                # Filter for cross-category and meaningful lift
-                display_cols = ['Category A', 'Category B', 'Specific Item Combo', 'Times Sold Together', 'Peak Hour', 'lift']
-                st.dataframe(rules_df[display_cols].sort_values('Times Sold Together', ascending=False), 
-                             column_config={
-                                 "Specific Item Combo": st.column_config.TextColumn("Item A + Item B", width="medium"),
-                                 "lift": st.column_config.NumberColumn("Lift Strength", format="%.2f"),
-                             },
-                             hide_index=True, use_container_width=True)
-            else: st.warning("No significant combos found.")
-            st.divider()
-
-        def render_part3():
-            st.subheader("3️⃣ Part 3: Strategic Recommendations")
-            
-            c1, c2 = st.columns(2)
-            with c1:
-                st.markdown("#### 🔥 Proven Winners (High Volume)")
-                st.caption("These pairs are already popular. **Action:** Create an official 'Bundle' on the menu to speed up ordering.")
-                if not proven_df.empty:
-                    st.dataframe(proven_df[['Specific Item Combo', 'Times Sold Together', 'Peak Hour']], hide_index=True, use_container_width=True)
-                else: st.info("No data.")
-            
-            with c2:
-                st.markdown("#### 💎 Hidden Gems (High Potential)")
-                st.caption("These pairs have strong chemistry (Lift > 1.5) but low sales. **Action:** Promote these actively to unlock new revenue.")
-                if not potential_df.empty:
-                    st.dataframe(potential_df[['Specific Item Combo', 'lift', 'Peak Hour']], 
-                                 column_config={"lift": st.column_config.NumberColumn("Compatibility Score", format="%.2f")},
-                                 hide_index=True, use_container_width=True)
-                else: st.info("No hidden gems found yet.")
-            st.divider()
-
-        combo_map = {"Part 1: Full Combo Map": render_part1, "Part 3: Strategic Recommendations": render_part3}
-        for block in combo_order:
-            if block in combo_map: combo_map[block]()
-
-    # --- TABS 5 & 6 (UNCHANGED) ---
-    with tab5:
-        st.header("🔮 Demand Prediction")
-        with st.spinner("Training..."):
-            forecast_data = advanced_forecast(df)
-        if not forecast_data.empty: st.dataframe(forecast_data.sort_values(['Category', 'Total Predicted Demand (Next 30 Days)'], ascending=[True, False]), use_container_width=True, hide_index=True)
-
-    with tab6:
-        st.subheader("🤖 Manager Chat")
-        if "messages" not in st.session_state: st.session_state.messages = []
-        for msg in st.session_state.messages: st.chat_message(msg["role"]).write(msg["content"])
-        if prompt := st.chat_input("Ask about combos..."):
-            st.chat_message("user").write(prompt)
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            try:
-                llm = ChatOpenAI(model="gpt-4o-mini", api_key=st.secrets["OPENAI_API_KEY"])
-                response = llm.invoke([SystemMessage(content="Restaurant Analyst"), HumanMessage(content=prompt)])
-                st.chat_message("assistant").write(response.content)
-                st.session_state.messages.append({"role": "assistant", "content": response.content})
-            except: st.error("Check API Key")
-
-else:
-    st.info("👋 Upload data to begin.")
+        def render_hourly_details():
+            st.subheader("🕰️ Hourly Sales Breakdown (9:00 AM - 11:00 PM)")
+            st.caption("Detailed breakdown of every item sold in each hour block.")
+            hourly_df = get_hourly_details(df)
+            if not hourly_df.empty:
+                st.dataframe(
+                    hourly_df,
+                    column_config={
+                        "Time Slot": st.column_config.TextColumn("Hour", width="medium"),
+                        "ItemName": "Item Name",
+                        "Quantity": st.column_config.NumberColumn("Units Sold"),
+                        "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")
+                    },
+                    hide_index=True,
+                    use_container_
