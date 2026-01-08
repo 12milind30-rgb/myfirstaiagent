@@ -1,8 +1,9 @@
-streamlit
+dash
+dash-bootstrap-components
 pandas
 plotly
-mlxtend
 openpyxl
+mlxtend
 openai
 langchain
 langchain-core
