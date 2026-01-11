@@ -5,7 +5,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import seaborn as sns
 import matplotlib.pyplot as plt
-# FIX: Added 'apriori' back to imports so the Combo tab works
 from mlxtend.frequent_patterns import fpgrowth, apriori, association_rules
 from mlxtend.preprocessing import TransactionEncoder
 from langchain_openai import ChatOpenAI
@@ -17,7 +16,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 8.1", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 8.2", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -72,32 +71,31 @@ def get_hourly_details(df):
     hourly_stats = hourly_stats.sort_values(['Hour', 'Quantity'], ascending=[True, False])
     return hourly_stats[['Time Slot', 'ItemName', 'Quantity', 'TotalAmount']]
 
-# --- ADVANCED ASSOCIATION ANALYSIS (RESEARCH BASED) ---
+# --- ADVANCED ASSOCIATION ANALYSIS (UPDATED) ---
 
 def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     """
-    Implements FP-Growth Algorithm (Han et al.) for superior performance on dense datasets.
-    Includes Zhang's Metric for advanced correlation stability.
+    Implements FP-Growth Algorithm with updated readable Support metrics.
     """
-    # 1. One-Hot Encoding (Faster than pivot for FP-Growth)
+    # 1. One-Hot Encoding
     basket = df.groupby(['OrderID', level])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID')
-    
-    # Convert to boolean (FP-Growth requires bool/int)
     basket_sets = basket.applymap(lambda x: True if x > 0 else False)
     
-    # 2. FP-Growth Algorithm (More memory efficient than Apriori)
+    # 2. FP-Growth
     frequent_itemsets = fpgrowth(basket_sets, min_support=min_sup, use_colnames=True)
     
     if frequent_itemsets.empty:
         return pd.DataFrame()
     
-    # 3. Generate Rules with Advanced Metrics
+    # 3. Generate Rules
     rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_conf)
     
-    # 4. Clean & Calculate Zhang's Metric
-    # Zhang's metric measures association (-1 to 1). 
-    # +1 = Perfect Association, -1 = Perfect Dissociation (Never buy together)
+    # 4. Add Readability Metrics (REQ: Support as % and Count)
+    total_orders = df['OrderID'].nunique()
+    rules['No. of Orders'] = (rules['support'] * total_orders).astype(int)
+    rules['Support (%)'] = rules['support'] * 100  # Convert 0.0064 -> 0.64
     
+    # 5. Zhang's Metric
     def zhangs_metric(rule):
         sup = rule['support']
         sup_a = rule['antecedent support']
@@ -113,14 +111,12 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
     
-    return rules[['Antecedent', 'Consequent', 'support', 'confidence', 'lift', 'zhang', 'conviction']]
+    return rules[['Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang', 'conviction']]
 
 # --- COMBO LOGIC (EXISTING) ---
 def get_combo_analysis_full(df):
-    # This uses basic Apriori for the "Smart Combos" tab (Legacy)
     basket = (df.groupby(['OrderID', 'ItemName'])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID'))
     basket_sets = basket.applymap(lambda x: 1 if x > 0 else 0)
-    # Using basic Apriori here to keep "Smart Combos" tab logic consistent as requested
     frequent = apriori(basket_sets, min_support=0.005, use_colnames=True) 
     if frequent.empty: return pd.DataFrame()
     rules = association_rules(frequent, metric="lift", min_threshold=1.05)
@@ -253,7 +249,7 @@ def advanced_forecast(df):
     return pd.DataFrame(forecast_results)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 8.1")
+st.title("📊 Mithas Restaurant Intelligence 8.2")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data", type=['xlsx'])
 
 if uploaded_file:
@@ -417,44 +413,39 @@ if uploaded_file:
         for block in combo_order:
             if block in combo_map: combo_map[block]()
     
-    # --- TAB 5: NEW ASSOCIATION ANALYSIS (FP-GROWTH) ---
+    # --- TAB 5: NEW ASSOCIATION ANALYSIS (UPDATED) ---
     with tab_assoc:
         st.header("🧬 Scientific Association Analysis (FP-Growth)")
-        st.markdown("Uses **FP-Growth Algorithm** for maximum accuracy on dense datasets. Sorted by **Zhang's Metric** (Stability).")
+        st.markdown("Uses **FP-Growth Algorithm** for maximum accuracy. Sorted by **Zhang's Metric**.")
         
-        # Controls
         c1, c2 = st.columns(2)
         with c1:
             analysis_level = st.radio("Analysis Level", ["ItemName", "Category"], horizontal=True)
         with c2:
             min_support_slider = st.slider("Minimum Support (Frequency)", 0.001, 0.05, 0.005, format="%.3f")
         
-        # Run Calculation
         with st.spinner("Running FP-Growth Algorithm..."):
             assoc_rules = run_advanced_association(df, level=analysis_level, min_sup=min_support_slider)
         
         if not assoc_rules.empty:
-            # Sort by Lift (Strength)
             assoc_rules = assoc_rules.sort_values('lift', ascending=False).head(50)
             
             st.dataframe(
                 assoc_rules,
                 column_config={
-                    "zhang": st.column_config.NumberColumn("Zhang's Metric", help="+1: Perfect Association, -1: Perfect Dissociation", format="%.2f"),
-                    "conviction": st.column_config.NumberColumn("Conviction", help="High value means consequent depends strongly on antecedent", format="%.2f"),
+                    "Support (%)": st.column_config.NumberColumn("Support % (Freq)", format="%.2f"), # REQ: Format as %
+                    "No. of Orders": st.column_config.NumberColumn("Orders Count", help="Absolute number of times this pair appeared"), # REQ: Added Count
+                    "zhang": st.column_config.NumberColumn("Zhang's Metric", help="+1: Perfect Association", format="%.2f"),
                     "lift": st.column_config.NumberColumn("Lift", format="%.2f"),
                     "confidence": st.column_config.NumberColumn("Confidence", format="%.2f"),
                 },
-                hide_index=True,
-                use_container_width=True,
-                height=600
+                hide_index=True, use_container_width=True, height=600
             )
             
-            # Visual: Scatter Plot of Rules
             fig = px.scatter(
-                assoc_rules, x="support", y="confidence", 
+                assoc_rules, x="Support (%)", y="confidence", 
                 size="lift", color="zhang",
-                hover_data=["Antecedent", "Consequent"],
+                hover_data=["Antecedent", "Consequent", "No. of Orders"],
                 title=f"Association Rules Landscape ({analysis_level} Level)",
                 color_continuous_scale=px.colors.diverging.RdBu
             )
