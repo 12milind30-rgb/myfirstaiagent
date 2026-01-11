@@ -5,7 +5,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import seaborn as sns
 import matplotlib.pyplot as plt
-from mlxtend.frequent_patterns import fpgrowth, association_rules
+# FIX: Added 'apriori' back to imports so the Combo tab works
+from mlxtend.frequent_patterns import fpgrowth, apriori, association_rules
 from mlxtend.preprocessing import TransactionEncoder
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -16,7 +17,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 8.0", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 8.1", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -252,7 +253,7 @@ def advanced_forecast(df):
     return pd.DataFrame(forecast_results)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 8.0")
+st.title("📊 Mithas Restaurant Intelligence 8.1")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data", type=['xlsx'])
 
 if uploaded_file:
