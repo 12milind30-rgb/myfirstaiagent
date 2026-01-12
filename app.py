@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 9.5", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 9.6", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -162,9 +162,11 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     frequent_itemsets = fpgrowth(basket_sets, min_support=min_sup, use_colnames=True)
     if frequent_itemsets.empty: return pd.DataFrame()
     rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_conf)
+    
     total_orders = df['OrderID'].nunique()
     rules['No. of Orders'] = (rules['support'] * total_orders).astype(int)
     rules['Support (%)'] = rules['support'] * 100
+    
     def zhangs_metric(rule):
         sup = rule['support']
         sup_a = rule['antecedent support']
@@ -173,6 +175,7 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
         denominator = max(sup * (1 - sup_a), sup_a * (sup_c - sup))
         if denominator == 0: return 0
         return numerator / denominator
+
     rules['zhang'] = rules.apply(zhangs_metric, axis=1)
     rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
@@ -281,7 +284,6 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         daily['Legend Name'] = daily['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
         fig = px.line(daily, x='Date', y='Quantity', color='Legend Name', markers=True)
         
-        # AVERAGE LINE
         for item in top_items:
             avg_val = daily[daily['ItemName'] == item]['Quantity'].mean()
             fig.add_hline(y=avg_val, line_dash="dot", line_color="grey", opacity=0.5)
@@ -296,7 +298,7 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         st.plotly_chart(fig, use_container_width=True)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 9.5")
+st.title("📊 Mithas Restaurant Intelligence 9.6")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
 
 if uploaded_file:
@@ -341,13 +343,10 @@ if uploaded_file:
                     st.plotly_chart(fig_hourly, use_container_width=True)
             with g2:
                 st.subheader("📅 Peak Days Graph")
-                # REQ 1: Fixed Order Mon-Sun and BOLD axis
                 daily_peak = df.groupby('DayOfWeek')['TotalAmount'].sum().reindex(
                     ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']).reset_index()
                 
                 fig_daily = px.bar(daily_peak, x='DayOfWeek', y='TotalAmount')
-                
-                # Apply Bold Font to X-Axis Labels
                 fig_daily.update_xaxes(
                     tickfont=dict(family='Arial Black', size=14, color='black'),
                     title_font=dict(family='Arial Black', size=16)
@@ -372,37 +371,60 @@ if uploaded_file:
             st.divider()
 
         def render_hourly_day_breakdown():
-            # REQ 2: New Section with Day Filter
-            st.subheader("📅 Daily Hourly Breakdown (Filter by Day)")
-            st.markdown("See exactly what sells during each hour of a **specific day** (e.g., Saturday vs Monday).")
+            # REQ: Matrix (Pivot Table) for Daily Breakdown
+            st.subheader("📅 Daily Hourly Breakdown (Matrix View)")
+            st.markdown("Drill down: **Day of Week** → **Specific Date** → **Hourly Matrix Table**.")
             
-            day_selected = st.selectbox("Select Day of Week", ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'])
+            day_selected = st.selectbox("1. Select Day of Week", ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'])
             
             # Filter Data by Day
             day_df = df[df['DayOfWeek'] == day_selected]
             
             if not day_df.empty:
-                hourly_day_df = get_hourly_details(day_df)
-                if not hourly_day_df.empty:
-                    time_slots = hourly_day_df['Time Slot'].unique()
-                    for slot in time_slots:
-                        slot_data = hourly_day_df[hourly_day_df['Time Slot'] == slot]
-                        total_rev = slot_data['TotalAmount'].sum()
-                        total_qty = slot_data['Quantity'].sum()
-                        top_item = slot_data.sort_values('Quantity', ascending=False).iloc[0]['ItemName']
-                        
-                        with st.expander(f"⏰ {slot} ({day_selected})  |  Rev: ₹{total_rev:,.0f}  |  Units: {total_qty}  |  Top: {top_item}"):
-                            st.dataframe(
-                                slot_data[['ItemName', 'Quantity', 'TotalAmount']],
-                                column_config={
-                                    "ItemName": "Item Name",
-                                    "Quantity": st.column_config.ProgressColumn("Units Sold", format="%d", min_value=0, max_value=int(hourly_day_df['Quantity'].max())),
-                                    "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")
-                                },
-                                hide_index=True, use_container_width=True
-                            )
+                # 2. Select Specific Date
+                unique_dates = sorted(day_df['Date'].dt.strftime('%Y-%m-%d').unique())
+                date_options = [f"All {day_selected}s Combined"] + unique_dates
+                date_selected = st.selectbox(f"2. Select Date ({day_selected})", date_options)
+                
+                # Filter Target Data
+                if date_selected == f"All {day_selected}s Combined":
+                    target_df = day_df
+                    st.caption(f"Showing aggregated data for **ALL** {day_selected}s.")
                 else:
-                    st.info(f"No hourly data found for {day_selected} (9am-11pm).")
+                    target_df = day_df[day_df['Date'].dt.strftime('%Y-%m-%d') == date_selected]
+                    st.caption(f"Showing data for **{date_selected}**.")
+                
+                # 3. Create Pivot Matrix
+                if not target_df.empty:
+                    # Filter 9am - 11pm (23)
+                    target_df = target_df[(target_df['Hour'] >= 9) & (target_df['Hour'] <= 23)]
+                    
+                    if not target_df.empty:
+                        # Group & Pivot
+                        pivot = target_df.groupby(['ItemName', 'Hour'])['Quantity'].sum().unstack(fill_value=0)
+                        
+                        # Ensure nice columns (9-10, 10-11)
+                        # We force columns 9 through 23 to exist so the table structure is consistent
+                        for h in range(9, 24):
+                            if h not in pivot.columns:
+                                pivot[h] = 0
+                        
+                        # Sort columns numerically
+                        pivot = pivot[sorted(pivot.columns)]
+                        
+                        # Rename to ranges "9-10"
+                        pivot.columns = [f"{int(h)}-{int(h)+1}" for h in pivot.columns]
+                        
+                        # Add Total Column
+                        pivot['Total Quantity'] = pivot.sum(axis=1)
+                        
+                        # Sort rows by Total Quantity
+                        pivot = pivot.sort_values('Total Quantity', ascending=False)
+                        
+                        # Display
+                        st.dataframe(pivot, use_container_width=True, height=600)
+                    else:
+                        st.warning("No sales found between 9:00 AM and 11:00 PM for this selection.")
             else:
                 st.warning(f"No transactions found for {day_selected} in the uploaded file.")
             st.divider()
