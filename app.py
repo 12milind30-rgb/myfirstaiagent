@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 9.3", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 9.4", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -361,7 +361,7 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         st.plotly_chart(fig, use_container_width=True)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 9.3")
+st.title("📊 Mithas Restaurant Intelligence 9.4")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
 
 if uploaded_file:
@@ -400,6 +400,12 @@ if uploaded_file:
                 if 'Hour' in df.columns:
                     hourly = df.groupby('Hour')['TotalAmount'].sum().reset_index()
                     fig_hourly = px.bar(hourly, x='Hour', y='TotalAmount')
+                    
+                    # FIX 1: RESTORE AVERAGE LINE
+                    avg_hourly = hourly['TotalAmount'].mean()
+                    fig_hourly.add_hline(y=avg_hourly, line_dash="dash", line_color="red", 
+                                         annotation_text=f"Avg: ₹{avg_hourly:,.0f}", annotation_position="top right")
+                    
                     st.plotly_chart(fig_hourly, use_container_width=True)
             with g2:
                 st.subheader("📅 Peak Days Graph")
@@ -415,7 +421,6 @@ if uploaded_file:
                 time_slots = hourly_df['Time Slot'].unique()
                 for slot in time_slots:
                     slot_data = hourly_df[hourly_df['Time Slot'] == slot]
-                    # FIX: Calculated Top Item and Units to show in Header
                     total_rev = slot_data['TotalAmount'].sum()
                     total_qty = slot_data['Quantity'].sum()
                     top_item = slot_data.sort_values('Quantity', ascending=False).iloc[0]['ItemName']
@@ -548,6 +553,17 @@ if uploaded_file:
                 assoc_rules['Status'] = "Category Level"
 
             st.dataframe(assoc_rules[['Status', 'Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang']], column_config={"Status": st.column_config.TextColumn("Strategic Status"), "Support (%)": st.column_config.NumberColumn("Support %", format="%.2f"), "No. of Orders": st.column_config.NumberColumn("Orders", format="%d"), "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"), "lift": st.column_config.NumberColumn("Lift", format="%.2f")}, hide_index=True, use_container_width=True, height=600)
+            
+            # FIX 2: RESTORE SCATTER PLOT
+            fig = px.scatter(
+                assoc_rules, x="Support (%)", y="confidence", 
+                size="lift", color="zhang",
+                hover_data=["Antecedent", "Consequent", "No. of Orders"],
+                title=f"Association Rules Landscape ({analysis_level} Level)",
+                color_continuous_scale=px.colors.diverging.RdBu
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
         else: st.warning("No rules found.")
 
     # --- TAB 7: DEMAND FORECAST (WITH SPECIFIC UPLOADER) ---
