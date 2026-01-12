@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 9.1", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 9.3", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -345,12 +345,23 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         if daily.empty: continue
         daily['Legend Name'] = daily['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
         fig = px.line(daily, x='Date', y='Quantity', color='Legend Name', markers=True)
+        
+        # RESTORED AVERAGE LINE AND ANNOTATION
+        for item in top_items:
+            avg_val = daily[daily['ItemName'] == item]['Quantity'].mean()
+            fig.add_hline(y=avg_val, line_dash="dot", line_color="grey", opacity=0.5)
+            fig.add_annotation(
+                x=daily['Date'].max(), y=avg_val, 
+                text=f"{item}: {avg_val:.1f}", 
+                showarrow=False, yshift=10, font=dict(color="red", size=10)
+            )
+            
         fig.update_xaxes(dtick="D2", tickformat="%d %b (%a)")
         fig.update_yaxes(matches=None, showticklabels=True)
         st.plotly_chart(fig, use_container_width=True)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 9.1")
+st.title("📊 Mithas Restaurant Intelligence 9.3")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
 
 if uploaded_file:
@@ -404,8 +415,12 @@ if uploaded_file:
                 time_slots = hourly_df['Time Slot'].unique()
                 for slot in time_slots:
                     slot_data = hourly_df[hourly_df['Time Slot'] == slot]
+                    # FIX: Calculated Top Item and Units to show in Header
                     total_rev = slot_data['TotalAmount'].sum()
-                    with st.expander(f"⏰ {slot}  |  Revenue: ₹{total_rev:,.0f}"):
+                    total_qty = slot_data['Quantity'].sum()
+                    top_item = slot_data.sort_values('Quantity', ascending=False).iloc[0]['ItemName']
+                    
+                    with st.expander(f"⏰ {slot}  |  Revenue: ₹{total_rev:,.0f}  |  Units: {total_qty}  |  Top: {top_item}"):
                         st.dataframe(slot_data[['ItemName', 'Quantity', 'TotalAmount']], hide_index=True, use_container_width=True)
             st.divider()
 
