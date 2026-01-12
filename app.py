@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 9.8", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 10.0", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -157,6 +157,7 @@ class HybridDemandForecaster:
 # --- COMBO & ASSOCIATION LOGIC ---
 
 def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
+    # This logic is 100% Preserved from V9.9
     basket = df.groupby(['OrderID', level])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID')
     basket_sets = basket.applymap(lambda x: True if x > 0 else False)
     frequent_itemsets = fpgrowth(basket_sets, min_support=min_sup, use_colnames=True)
@@ -179,6 +180,12 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     rules['zhang'] = rules.apply(zhangs_metric, axis=1)
     rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
+    
+    # DEDUPLICATION LOGIC (PRESERVED)
+    rules = rules.sort_values('lift', ascending=False)
+    rules = rules.drop_duplicates(subset=['Antecedent', 'Consequent'])
+    
+    # CONVICTION COLUMN (PRESERVED)
     return rules[['Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang', 'conviction']]
 
 def get_combo_analysis_full(df):
@@ -298,7 +305,7 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         st.plotly_chart(fig, use_container_width=True)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 9.8")
+st.title("📊 Mithas Restaurant Intelligence 10.0")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
 
 if uploaded_file:
@@ -442,11 +449,19 @@ if uploaded_file:
             st.dataframe(star_df[['Item Name', 'TotalAmount', 'Contribution %', 'Peak Selling Hour', 'Qty Sold (Peak)']], 
                          column_config={"TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"), "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%")}, hide_index=True, use_container_width=True)
 
-        block_map = {"Metrics": render_metrics, "Graphs": render_graphs, "Hourly Breakdown (Aggregated)": render_hourly_aggregated, "Hourly Breakdown (Day-Level)": render_hourly_day_breakdown, "Peak Items List": render_peak_list, "Contributions": render_contributions, "Star Items": render_star_items}
+        block_map = {
+            "Metrics": render_metrics, 
+            "Graphs": render_graphs, 
+            "Hourly Breakdown (Aggregated)": render_hourly_aggregated,
+            "Hourly Breakdown (Day-Level)": render_hourly_day_breakdown,
+            "Peak Items List": render_peak_list, 
+            "Contributions": render_contributions, 
+            "Star Items": render_star_items
+        }
         for block_name in overview_order:
             if block_name in block_map: block_map[block_name]()
 
-    # --- TAB: CATEGORY DETAILS (UPDATED) ---
+    # --- TAB: CATEGORY DETAILS (UPDATED: DAY-WISE COLUMNS) ---
     with tab_cat:
         st.header("📂 Category Deep-Dive")
         cats = df['Category'].unique()
@@ -463,11 +478,10 @@ if uploaded_file:
             
             # Day-wise Pivot
             day_pivot = cat_data.groupby(['ItemName', 'DayOfWeek'])['Quantity'].sum().unstack(fill_value=0)
-            # Ensure all days exist
             for day in days_order:
                 if day not in day_pivot.columns:
                     day_pivot[day] = 0
-            day_pivot = day_pivot[days_order] # Reorder columns
+            day_pivot = day_pivot[days_order] 
             
             # Merge
             cat_stats = pd.merge(cat_stats, day_pivot, on='ItemName', how='left').fillna(0)
@@ -476,13 +490,11 @@ if uploaded_file:
             # Formatting
             cat_stats['Item Name'] = cat_stats['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
             
-            # Column Config
             col_config = {
                 "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"),
                 "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%"),
                 "Quantity": st.column_config.NumberColumn("Total Qty")
             }
-            # Configure Day columns to show as plain numbers
             for day in days_order:
                 col_config[day] = st.column_config.NumberColumn(day, format="%d")
             
@@ -571,7 +583,7 @@ if uploaded_file:
             else:
                 assoc_rules['Status'] = "Category Level"
 
-            st.dataframe(assoc_rules[['Status', 'Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang']], column_config={"Status": st.column_config.TextColumn("Strategic Status"), "Support (%)": st.column_config.NumberColumn("Support %", format="%.2f"), "No. of Orders": st.column_config.NumberColumn("Orders", format="%d"), "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"), "lift": st.column_config.NumberColumn("Lift", format="%.2f")}, hide_index=True, use_container_width=True, height=600)
+            st.dataframe(assoc_rules[['Status', 'Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang', 'conviction']], column_config={"Status": st.column_config.TextColumn("Strategic Status"), "Support (%)": st.column_config.NumberColumn("Support %", format="%.2f"), "No. of Orders": st.column_config.NumberColumn("Orders", format="%d"), "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"), "lift": st.column_config.NumberColumn("Lift", format="%.2f"), "conviction": st.column_config.NumberColumn("Conviction", format="%.2f")}, hide_index=True, use_container_width=True, height=600)
             
             fig = px.scatter(
                 assoc_rules, x="Support (%)", y="confidence", 
