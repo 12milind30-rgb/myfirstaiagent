@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 9.9.1", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 10.1", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -75,6 +75,7 @@ def get_peak_hour_for_pair(df, item_a, item_b):
 
 def get_hourly_details(df):
     if 'Hour' not in df.columns: return pd.DataFrame()
+    # Note: Kept filter here for Aggregated View per instruction to keep existing view
     mask = (df['Hour'] >= 9) & (df['Hour'] <= 23)
     filtered = df[mask].copy()
     hourly_stats = filtered.groupby(['Hour', 'ItemName']).agg({
@@ -180,7 +181,6 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
     
-    # DEDUPLICATION & CONVICTION
     rules = rules.sort_values('lift', ascending=False)
     rules = rules.drop_duplicates(subset=['Antecedent', 'Consequent'])
     return rules[['Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang', 'conviction']]
@@ -302,7 +302,7 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         st.plotly_chart(fig, use_container_width=True)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 9.9.1")
+st.title("📊 Mithas Restaurant Intelligence 10.1")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
 
 if uploaded_file:
@@ -341,9 +341,14 @@ if uploaded_file:
                 if 'Hour' in df.columns:
                     hourly = df.groupby('Hour')['TotalAmount'].sum().reset_index()
                     fig_hourly = px.bar(hourly, x='Hour', y='TotalAmount')
+                    
                     avg_hourly = hourly['TotalAmount'].mean()
                     fig_hourly.add_hline(y=avg_hourly, line_dash="dash", line_color="red", 
                                          annotation_text=f"Avg: ₹{avg_hourly:,.0f}", annotation_position="top right")
+                    
+                    # FIX 1: Show ALL hours
+                    fig_hourly.update_xaxes(tickmode='linear', dtick=1)
+                    
                     st.plotly_chart(fig_hourly, use_container_width=True)
             with g2:
                 st.subheader("📅 Peak Days Graph")
@@ -362,7 +367,11 @@ if uploaded_file:
             st.subheader("🕰️ Hourly Sales Breakdown (9am - 11pm) - Aggregated")
             st.caption("Aggregated view of all days combined.")
             hourly_df = get_hourly_details(df)
+            
+            # FIX 3: Apply Pareto Highlight
             if not hourly_df.empty:
+                hourly_df['ItemName'] = hourly_df['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
+                
                 time_slots = hourly_df['Time Slot'].unique()
                 for slot in time_slots:
                     slot_data = hourly_df[hourly_df['Time Slot'] == slot]
@@ -388,7 +397,6 @@ if uploaded_file:
                 date_options = [f"All {day_selected}s Combined"] + unique_dates
                 date_selected = st.selectbox(f"2. Select Date ({day_selected})", date_options)
                 
-                # Base Data for Matrix (Selected Day/Date)
                 if date_selected == f"All {day_selected}s Combined":
                     target_df = day_df
                 else:
@@ -407,35 +415,33 @@ if uploaded_file:
                 # --- 3-DAY QUANTITY LOGIC ---
                 df_3day = pd.DataFrame()
                 if date_selected == f"All {day_selected}s Combined":
-                    # Sum of (Prev Day + Selected Day + Next Day)
                     curr_idx = days_list.index(day_selected)
                     prev_day = days_list[(curr_idx - 1) % 7]
                     next_day = days_list[(curr_idx + 1) % 7]
                     target_days = [prev_day, day_selected, next_day]
                     df_3day = df[df['DayOfWeek'].isin(target_days)]
                 else:
-                    # Sum of (Date-1 + Date + Date+1)
                     sel_dt = pd.to_datetime(date_selected)
                     target_dates = [sel_dt - timedelta(days=1), sel_dt, sel_dt + timedelta(days=1)]
                     df_3day = df[df['Date'].isin(target_dates)]
 
-                # Apply Category Filter to 3-Day Data
                 if category_selected != "All Categories":
                     df_3day = df_3day[df_3day['Category'] == category_selected]
 
-                # Group to get totals per item for 3-Day Window
                 qty_3day = df_3day.groupby('ItemName')['Quantity'].sum().rename("3-Day Qty")
 
                 # --- MATRIX BUILD ---
                 if not target_df.empty:
-                    target_df = target_df[(target_df['Hour'] >= 9) & (target_df['Hour'] <= 23)]
+                    # FIX 2: REMOVED THE 9AM-11PM FILTER HERE to fix 83 vs 85 mismatch
+                    # Now it includes sales from all hours for the selected day/category
+                    
                     if not target_df.empty:
                         pivot = target_df.groupby(['ItemName', 'Hour'])['Quantity'].sum().unstack(fill_value=0)
                         
-                        # Ensure columns 9-23 exist
-                        for h in range(9, 24):
-                            if h not in pivot.columns: pivot[h] = 0
+                        # Ensure nice column sorting (even if some hours missing)
                         pivot = pivot[sorted(pivot.columns)]
+                        
+                        # Rename columns
                         pivot.columns = [f"{int(h)}-{int(h)+1}" for h in pivot.columns]
                         
                         # Add Total Column
@@ -443,16 +449,17 @@ if uploaded_file:
                         
                         # Join 3-Day Quantity
                         pivot = pivot.join(qty_3day, how='left').fillna(0)
-                        
-                        # Convert 3-Day column to int
                         pivot['3-Day Qty'] = pivot['3-Day Qty'].astype(int)
                         
                         # Sort Rows
                         pivot = pivot.sort_values('Total Quantity', ascending=False)
                         
+                        # FIX 3: Apply Pareto Highlight to Index (ItemName)
+                        pivot.index = pivot.index.map(lambda x: f"★ {x}" if x in pareto_list else x)
+                        
                         st.dataframe(pivot, use_container_width=True, height=600)
                     else:
-                        st.warning("No sales found in business hours (9am-11pm) for this selection.")
+                        st.warning("No sales found for this selection.")
                 else:
                     st.warning(f"No data found for Category: {category_selected} on this date.")
             else:
