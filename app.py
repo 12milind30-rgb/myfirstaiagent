@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 10.0", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 9.9.1", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -157,7 +157,6 @@ class HybridDemandForecaster:
 # --- COMBO & ASSOCIATION LOGIC ---
 
 def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
-    # This logic is 100% Preserved from V9.9
     basket = df.groupby(['OrderID', level])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID')
     basket_sets = basket.applymap(lambda x: True if x > 0 else False)
     frequent_itemsets = fpgrowth(basket_sets, min_support=min_sup, use_colnames=True)
@@ -181,11 +180,9 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
     
-    # DEDUPLICATION LOGIC (PRESERVED)
+    # DEDUPLICATION & CONVICTION
     rules = rules.sort_values('lift', ascending=False)
     rules = rules.drop_duplicates(subset=['Antecedent', 'Consequent'])
-    
-    # CONVICTION COLUMN (PRESERVED)
     return rules[['Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang', 'conviction']]
 
 def get_combo_analysis_full(df):
@@ -305,7 +302,7 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         st.plotly_chart(fig, use_container_width=True)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 10.0")
+st.title("📊 Mithas Restaurant Intelligence 9.9.1")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
 
 if uploaded_file:
@@ -381,7 +378,9 @@ if uploaded_file:
             st.subheader("📅 Daily Hourly Breakdown (Matrix View)")
             st.markdown("Drill down: **Day** → **Date** → **Category** → **Hourly Matrix**.")
             
-            day_selected = st.selectbox("1. Select Day of Week", ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'])
+            days_list = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+            day_selected = st.selectbox("1. Select Day of Week", days_list)
+            
             day_df = df[df['DayOfWeek'] == day_selected]
             
             if not day_df.empty:
@@ -389,6 +388,7 @@ if uploaded_file:
                 date_options = [f"All {day_selected}s Combined"] + unique_dates
                 date_selected = st.selectbox(f"2. Select Date ({day_selected})", date_options)
                 
+                # Base Data for Matrix (Selected Day/Date)
                 if date_selected == f"All {day_selected}s Combined":
                     target_df = day_df
                 else:
@@ -404,20 +404,59 @@ if uploaded_file:
                 else:
                     st.caption(f"Showing **All Items** for **{date_selected}**.")
 
+                # --- 3-DAY QUANTITY LOGIC ---
+                df_3day = pd.DataFrame()
+                if date_selected == f"All {day_selected}s Combined":
+                    # Sum of (Prev Day + Selected Day + Next Day)
+                    curr_idx = days_list.index(day_selected)
+                    prev_day = days_list[(curr_idx - 1) % 7]
+                    next_day = days_list[(curr_idx + 1) % 7]
+                    target_days = [prev_day, day_selected, next_day]
+                    df_3day = df[df['DayOfWeek'].isin(target_days)]
+                else:
+                    # Sum of (Date-1 + Date + Date+1)
+                    sel_dt = pd.to_datetime(date_selected)
+                    target_dates = [sel_dt - timedelta(days=1), sel_dt, sel_dt + timedelta(days=1)]
+                    df_3day = df[df['Date'].isin(target_dates)]
+
+                # Apply Category Filter to 3-Day Data
+                if category_selected != "All Categories":
+                    df_3day = df_3day[df_3day['Category'] == category_selected]
+
+                # Group to get totals per item for 3-Day Window
+                qty_3day = df_3day.groupby('ItemName')['Quantity'].sum().rename("3-Day Qty")
+
+                # --- MATRIX BUILD ---
                 if not target_df.empty:
                     target_df = target_df[(target_df['Hour'] >= 9) & (target_df['Hour'] <= 23)]
                     if not target_df.empty:
                         pivot = target_df.groupby(['ItemName', 'Hour'])['Quantity'].sum().unstack(fill_value=0)
+                        
+                        # Ensure columns 9-23 exist
                         for h in range(9, 24):
                             if h not in pivot.columns: pivot[h] = 0
                         pivot = pivot[sorted(pivot.columns)]
                         pivot.columns = [f"{int(h)}-{int(h)+1}" for h in pivot.columns]
+                        
+                        # Add Total Column
                         pivot['Total Quantity'] = pivot.sum(axis=1)
+                        
+                        # Join 3-Day Quantity
+                        pivot = pivot.join(qty_3day, how='left').fillna(0)
+                        
+                        # Convert 3-Day column to int
+                        pivot['3-Day Qty'] = pivot['3-Day Qty'].astype(int)
+                        
+                        # Sort Rows
                         pivot = pivot.sort_values('Total Quantity', ascending=False)
+                        
                         st.dataframe(pivot, use_container_width=True, height=600)
-                    else: st.warning("No sales found in business hours (9am-11pm) for this selection.")
-                else: st.warning(f"No data found for Category: {category_selected} on this date.")
-            else: st.warning(f"No transactions found for {day_selected} in the uploaded file.")
+                    else:
+                        st.warning("No sales found in business hours (9am-11pm) for this selection.")
+                else:
+                    st.warning(f"No data found for Category: {category_selected} on this date.")
+            else:
+                st.warning(f"No transactions found for {day_selected} in the uploaded file.")
             st.divider()
 
         def render_peak_list():
