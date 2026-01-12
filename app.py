@@ -16,7 +16,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 8.2", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 8.3", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -43,6 +43,17 @@ def load_data(file):
         except:
             df['Hour'] = 0
     return df
+
+# --- PARETO LOGIC (GLOBAL) ---
+def get_pareto_items(df):
+    """Returns a list of items that contribute to 80% of total revenue"""
+    item_rev = df.groupby('ItemName')['TotalAmount'].sum().sort_values(ascending=False).reset_index()
+    total_revenue = item_rev['TotalAmount'].sum()
+    item_rev['Cumulative'] = item_rev['TotalAmount'].cumsum()
+    item_rev['CumPerc'] = 100 * item_rev['Cumulative'] / total_revenue
+    # Filter top 80% (cutoff)
+    pareto_items = item_rev[item_rev['CumPerc'] <= 80]['ItemName'].tolist()
+    return pareto_items
 
 # --- HELPER FUNCTIONS ---
 
@@ -71,12 +82,9 @@ def get_hourly_details(df):
     hourly_stats = hourly_stats.sort_values(['Hour', 'Quantity'], ascending=[True, False])
     return hourly_stats[['Time Slot', 'ItemName', 'Quantity', 'TotalAmount']]
 
-# --- ADVANCED ASSOCIATION ANALYSIS (UPDATED) ---
+# --- ADVANCED ASSOCIATION ANALYSIS ---
 
 def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
-    """
-    Implements FP-Growth Algorithm with updated readable Support metrics.
-    """
     # 1. One-Hot Encoding
     basket = df.groupby(['OrderID', level])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID')
     basket_sets = basket.applymap(lambda x: True if x > 0 else False)
@@ -84,16 +92,15 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     # 2. FP-Growth
     frequent_itemsets = fpgrowth(basket_sets, min_support=min_sup, use_colnames=True)
     
-    if frequent_itemsets.empty:
-        return pd.DataFrame()
+    if frequent_itemsets.empty: return pd.DataFrame()
     
     # 3. Generate Rules
     rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_conf)
     
-    # 4. Add Readability Metrics (REQ: Support as % and Count)
+    # 4. Add Metrics
     total_orders = df['OrderID'].nunique()
     rules['No. of Orders'] = (rules['support'] * total_orders).astype(int)
-    rules['Support (%)'] = rules['support'] * 100  # Convert 0.0064 -> 0.64
+    rules['Support (%)'] = rules['support'] * 100
     
     # 5. Zhang's Metric
     def zhangs_metric(rule):
@@ -107,13 +114,13 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
 
     rules['zhang'] = rules.apply(zhangs_metric, axis=1)
     
-    # Format for display
+    # Format
     rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
     
     return rules[['Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang', 'conviction']]
 
-# --- COMBO LOGIC (EXISTING) ---
+# --- COMBO LOGIC ---
 def get_combo_analysis_full(df):
     basket = (df.groupby(['OrderID', 'ItemName'])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID'))
     basket_sets = basket.applymap(lambda x: 1 if x > 0 else 0)
@@ -135,12 +142,14 @@ def get_combo_analysis_full(df):
 
 def get_part3_strategy(rules_df):
     if rules_df.empty: return pd.DataFrame(), pd.DataFrame()
+    # Proven: Top 10 by Frequency
     proven = rules_df.sort_values('Times Sold Together', ascending=False).head(10).copy()
+    # Potential: High Lift (>1.5) but not in top 10
     potential = rules_df[~rules_df.index.isin(proven.index)]
     potential = potential[potential['lift'] > 1.5].sort_values('lift', ascending=False).head(10).copy()
     return proven, potential
 
-# --- ANALYTICS MODULES (EXISTING) ---
+# --- ANALYTICS MODULES ---
 def get_overview_metrics(df):
     total_rev = df['TotalAmount'].sum()
     total_orders = df['OrderID'].nunique()
@@ -151,11 +160,13 @@ def get_overview_metrics(df):
     aov = total_rev / total_orders if total_orders > 0 else 0
     return total_rev, total_orders, avg_rev_day, avg_rev_week, aov
 
-def get_star_items_with_hours(df):
+def get_star_items_with_hours(df, limit_n):
     total_rev = df['TotalAmount'].sum()
     item_stats = df.groupby('ItemName').agg({'TotalAmount': 'sum'}).reset_index()
     item_stats['Contribution %'] = (item_stats['TotalAmount'] / total_rev) * 100
-    item_stats = item_stats.sort_values('TotalAmount', ascending=False).head(20)
+    # Apply limit from Slider
+    item_stats = item_stats.sort_values('TotalAmount', ascending=False).head(limit_n)
+    
     peak_hours, peak_qtys = [], []
     for item in item_stats['ItemName']:
         item_data = df[df['ItemName'] == item]
@@ -184,10 +195,8 @@ def get_contribution_lists(df):
     cat_df = df.groupby('Category')['TotalAmount'].sum().reset_index()
     cat_df['Contribution'] = (cat_df['TotalAmount'] / total_rev) * 100
     cat_df = cat_df.sort_values('TotalAmount', ascending=False)
-    item_df = df.groupby(['Category', 'ItemName'])['TotalAmount'].sum().reset_index()
-    item_df['Contribution'] = (item_df['TotalAmount'] / total_rev) * 100
-    item_df = item_df.sort_values(['Category', 'TotalAmount'], ascending=[True, False])
-    return cat_df, item_df
+    # Item Level Removed per request
+    return cat_df
 
 def analyze_pareto_hierarchical(df):
     item_rev = df.groupby(['Category', 'ItemName'])['TotalAmount'].sum().reset_index()
@@ -208,20 +217,28 @@ def analyze_pareto_hierarchical(df):
     display_df = display_df.sort_values(['CatContrib', 'TotalAmount'], ascending=[False, False])
     return display_df, ratio_text, percentage_of_menu
 
-def plot_time_series_fixed(df):
+def plot_time_series_fixed(df, pareto_list, n_items):
     categories = df['Category'].unique()
     for cat in categories:
         st.subheader(f"📈 {cat}")
         cat_data = df[df['Category'] == cat]
-        top_items = cat_data.groupby('ItemName')['Quantity'].sum().nlargest(5).index.tolist()
+        
+        # Sort by Revenue Contribution, Limit to Slider N
+        top_items = cat_data.groupby('ItemName')['TotalAmount'].sum().sort_values(ascending=False).head(n_items).index.tolist()
+        
         subset = cat_data[cat_data['ItemName'].isin(top_items)]
         daily = subset.groupby(['Date', 'ItemName'])['Quantity'].sum().reset_index()
         if daily.empty: continue
-        fig = px.line(daily, x='Date', y='Quantity', color='ItemName', markers=True)
+        
+        # Mark Pareto Items in Legend
+        daily['Legend Name'] = daily['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
+        
+        fig = px.line(daily, x='Date', y='Quantity', color='Legend Name', markers=True)
         for item in top_items:
             avg_val = daily[daily['ItemName'] == item]['Quantity'].mean()
-            fig.add_hline(y=avg_val, line_dash="dot", line_color="grey", opacity=0.5)
-            fig.add_annotation(x=daily['Date'].max(), y=avg_val, text=f"{item}: {avg_val:.1f}", showarrow=False, yshift=10, font=dict(color="red", size=10))
+            # fig.add_hline(y=avg_val, line_dash="dot", line_color="grey", opacity=0.3) 
+            # Commented out average line to avoid clutter with 30 items
+            
         fig.update_xaxes(dtick="D2", tickformat="%d %b (%a)")
         fig.update_yaxes(matches=None, showticklabels=True)
         st.plotly_chart(fig, use_container_width=True)
@@ -249,18 +266,19 @@ def advanced_forecast(df):
     return pd.DataFrame(forecast_results)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 8.2")
+st.title("📊 Mithas Restaurant Intelligence 8.3")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data", type=['xlsx'])
 
 if uploaded_file:
     df = load_data(uploaded_file)
+    pareto_list = get_pareto_items(df) # Get list of 80% contributors
+    pareto_count = len(pareto_list)
     
-    # REQ: Added "Association Analysis" after Smart Combos
     tab1, tab_cat, tab2, tab3, tab4, tab_assoc, tab5, tab6 = st.tabs([
         "Overview", "Category Details", "Pareto (Visual)", "Time Series", "Smart Combos", "Association Analysis", "Demand Forecast", "AI Chat"
     ])
 
-    # --- TAB 1: OVERVIEW (VISUALLY UPGRADED) ---
+    # --- TAB 1: OVERVIEW ---
     with tab1:
         st.header("🏢 Business Overview")
         with st.expander("🛠️ Reorder Page Layout", expanded=False):
@@ -287,11 +305,7 @@ if uploaded_file:
                 if 'Hour' in df.columns:
                     hourly = df.groupby('Hour')['TotalAmount'].sum().reset_index()
                     fig_hourly = px.bar(hourly, x='Hour', y='TotalAmount')
-                    avg_hourly = hourly['TotalAmount'].mean()
-                    fig_hourly.add_hline(y=avg_hourly, line_dash="dash", line_color="red", annotation_text=f"Avg: ₹{avg_hourly:,.0f}", annotation_position="top right")
-                    fig_hourly.update_xaxes(tickmode='linear', dtick=1)
                     st.plotly_chart(fig_hourly, use_container_width=True)
-                else: st.warning("No Time data found.")
             with g2:
                 st.subheader("📅 Peak Days Graph")
                 daily_peak = df.groupby('DayOfWeek')['TotalAmount'].sum().reindex(
@@ -301,24 +315,14 @@ if uploaded_file:
 
         def render_hourly_details():
             st.subheader("🕰️ Hourly Sales Breakdown (9:00 AM - 11:00 PM)")
-            st.caption("Click on an hour to see detailed item sales.")
             hourly_df = get_hourly_details(df)
             if not hourly_df.empty:
                 time_slots = hourly_df['Time Slot'].unique()
                 for slot in time_slots:
                     slot_data = hourly_df[hourly_df['Time Slot'] == slot]
-                    total_rev_slot = slot_data['TotalAmount'].sum()
-                    total_qty_slot = slot_data['Quantity'].sum()
-                    top_item_slot = slot_data.iloc[0]['ItemName']
-                    with st.expander(f"⏰ {slot}  |  Revenue: ₹{total_rev_slot:,.0f}  |  Units: {total_qty_slot}  |  Top: {top_item_slot}"):
-                        st.dataframe(
-                            slot_data[['ItemName', 'Quantity', 'TotalAmount']],
-                            column_config={
-                                "ItemName": "Item Name",
-                                "Quantity": st.column_config.ProgressColumn("Units Sold", format="%d", min_value=0, max_value=int(hourly_df['Quantity'].max())),
-                                "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")
-                            }, hide_index=True, use_container_width=True)
-            else: st.info("No sales data found between 9 AM and 11 PM.")
+                    total_rev = slot_data['TotalAmount'].sum()
+                    with st.expander(f"⏰ {slot}  |  Revenue: ₹{total_rev:,.0f}"):
+                        st.dataframe(slot_data[['ItemName', 'Quantity', 'TotalAmount']], hide_index=True, use_container_width=True)
             st.divider()
 
         def render_peak_list():
@@ -335,25 +339,33 @@ if uploaded_file:
             st.divider()
 
         def render_contributions():
-            cat_cont, item_cont = get_contribution_lists(df)
-            col_cat, col_item = st.columns(2)
-            with col_cat:
-                st.subheader("📂 Category Contribution %")
-                st.dataframe(cat_cont[['Category', 'TotalAmount', 'Contribution']], column_config={"Contribution": st.column_config.ProgressColumn("Share %", format="%.2f%%", min_value=0, max_value=100), "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")}, hide_index=True, use_container_width=True)
-            with col_item:
-                st.subheader("🍽️ Item Contribution (by Category)")
-                st.dataframe(item_cont[['Category', 'ItemName', 'TotalAmount', 'Contribution']], column_config={"Contribution": st.column_config.NumberColumn("Share %", format="%.2f%%"), "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")}, hide_index=True, height=400, use_container_width=True)
+            cat_cont = get_contribution_lists(df)
+            st.subheader("📂 Category Contribution (Pie Chart)")
+            # REQ 3: Converted table to Pie Chart
+            fig_pie = px.pie(cat_cont, values='TotalAmount', names='Category', hole=0.3)
+            st.plotly_chart(fig_pie, use_container_width=True)
             st.divider()
 
         def render_star_items():
-            st.subheader("⭐ Top 20 Star Items & Selling Hours")
-            star_df = get_star_items_with_hours(df)
-            st.dataframe(star_df, column_config={
-                "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"),
-                "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%", min_value=0, max_value=star_df['Contribution %'].max()),
-                "Peak Selling Hour": st.column_config.TextColumn("Peak Hour Window"),
-                "Qty Sold (Peak)": st.column_config.NumberColumn("Qty in Peak Hour")
-            }, hide_index=True, use_container_width=True)
+            st.subheader("⭐ Top Star Items & Selling Hours")
+            # REQ 3: Slider for Star Items (Min 10, Max Pareto Count)
+            slider_max = max(10, pareto_count)
+            n_star = st.slider("Select Number of Star Items", 10, slider_max, 20)
+            
+            star_df = get_star_items_with_hours(df, n_star)
+            
+            # Apply formatting for Pareto Items
+            star_df['Item Name'] = star_df['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
+            
+            st.dataframe(
+                star_df[['Item Name', 'TotalAmount', 'Contribution %', 'Peak Selling Hour', 'Qty Sold (Peak)']],
+                column_config={
+                    "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"),
+                    "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%"),
+                },
+                hide_index=True,
+                use_container_width=True
+            )
 
         block_map = {"Metrics": render_metrics, "Graphs": render_graphs, "Hourly Breakdown (9am-11pm)": render_hourly_details, "Peak Items List": render_peak_list, "Contributions": render_contributions, "Star Items": render_star_items}
         for block_name in overview_order:
@@ -370,7 +382,11 @@ if uploaded_file:
             cat_stats = cat_data.groupby('ItemName').agg({'TotalAmount': 'sum', 'Quantity': 'sum'}).reset_index()
             cat_stats['Contribution %'] = (cat_stats['TotalAmount'] / total_business_rev) * 100
             cat_stats = cat_stats.sort_values('TotalAmount', ascending=False)
-            st.dataframe(cat_stats, column_config={"ItemName": "Item Name", "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"), "Quantity": st.column_config.NumberColumn("Units Sold"), "Contribution %": st.column_config.ProgressColumn("Contribution to Total Rev", format="%.2f%%", min_value=0, max_value=100)}, hide_index=True, use_container_width=True)
+            
+            # Highlight Pareto
+            cat_stats['Item Name'] = cat_stats['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
+            
+            st.dataframe(cat_stats[['Item Name', 'TotalAmount', 'Quantity', 'Contribution %']], column_config={"TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"), "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%")}, hide_index=True, use_container_width=True)
             st.divider()
 
     # --- TAB 2: PARETO (UNCHANGED) ---
@@ -378,12 +394,18 @@ if uploaded_file:
         st.header("🏆 Pareto Analysis")
         pareto_df, ratio_msg, menu_perc = analyze_pareto_hierarchical(df)
         st.info(f"💡 **Insight:** {ratio_msg} (Only {menu_perc:.1f}% of your menu!)")
+        
+        # Highlight
+        pareto_df['ItemName'] = pareto_df['ItemName'].apply(lambda x: f"★ {x}")
+        
         st.dataframe(pareto_df, column_config={"CatContrib": st.column_config.NumberColumn("Category Share %", format="%.2f%%"), "ItemContrib": st.column_config.NumberColumn("Item Share % (Global)", format="%.2f%%"), "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")}, hide_index=True, height=600, use_container_width=True)
 
-    # --- TAB 3: TIME SERIES (UNCHANGED) ---
+    # --- TAB 3: TIME SERIES (UPDATED) ---
     with tab3:
         st.header("📅 Daily Trends")
-        plot_time_series_fixed(df)
+        # REQ 4: Slider for Time Series
+        n_ts = st.slider("Number of items per category (Top N by Revenue)", 5, 30, 5)
+        plot_time_series_fixed(df, pareto_list, n_ts)
 
     # --- TAB 4: SMART COMBOS (UNCHANGED) ---
     with tab4:
@@ -392,6 +414,13 @@ if uploaded_file:
             combo_order = st.multiselect("Section Order", ["Part 1: Full Combo Map", "Part 3: Strategic Recommendations"], default=["Part 1: Full Combo Map", "Part 3: Strategic Recommendations"])
         rules_df = get_combo_analysis_full(df)
         proven_df, potential_df = get_part3_strategy(rules_df)
+        
+        # We need these lists for Association Tab
+        proven_list = []
+        potential_list = []
+        if not proven_df.empty: proven_list = proven_df['pair'].tolist()
+        if not potential_df.empty: potential_list = potential_df['pair'].tolist()
+        
         def render_part1():
             st.subheader("1️⃣ Part 1: Full Category + Item Combo Map")
             if not rules_df.empty:
@@ -413,10 +442,9 @@ if uploaded_file:
         for block in combo_order:
             if block in combo_map: combo_map[block]()
     
-    # --- TAB 5: NEW ASSOCIATION ANALYSIS (UPDATED) ---
+    # --- TAB 5: ASSOCIATION ANALYSIS (HIGHLIGHTS) ---
     with tab_assoc:
         st.header("🧬 Scientific Association Analysis (FP-Growth)")
-        st.markdown("Uses **FP-Growth Algorithm** for maximum accuracy. Sorted by **Zhang's Metric**.")
         
         c1, c2 = st.columns(2)
         with c1:
@@ -430,12 +458,29 @@ if uploaded_file:
         if not assoc_rules.empty:
             assoc_rules = assoc_rules.sort_values('lift', ascending=False).head(50)
             
+            # REQ 1: Highlight Winners/Gems
+            def get_status(row):
+                # Create sorted tuple for comparison
+                current_pair = tuple(sorted([row['Antecedent'], row['Consequent']]))
+                if current_pair in proven_list:
+                    return "🔥 Proven Winner"
+                elif current_pair in potential_list:
+                    return "💎 Hidden Gem"
+                return "Normal"
+
+            # Apply logic only if we are at Item Level (lists match)
+            if analysis_level == 'ItemName':
+                assoc_rules['Status'] = assoc_rules.apply(get_status, axis=1)
+            else:
+                assoc_rules['Status'] = "Category Level"
+
             st.dataframe(
-                assoc_rules,
+                assoc_rules[['Status', 'Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang']],
                 column_config={
-                    "Support (%)": st.column_config.NumberColumn("Support % (Freq)", format="%.2f"), # REQ: Format as %
-                    "No. of Orders": st.column_config.NumberColumn("Orders Count", help="Absolute number of times this pair appeared"), # REQ: Added Count
-                    "zhang": st.column_config.NumberColumn("Zhang's Metric", help="+1: Perfect Association", format="%.2f"),
+                    "Status": st.column_config.TextColumn("Strategic Status"),
+                    "Support (%)": st.column_config.NumberColumn("Support %", format="%.2f"),
+                    "No. of Orders": st.column_config.NumberColumn("Orders", format="%d"),
+                    "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"),
                     "lift": st.column_config.NumberColumn("Lift", format="%.2f"),
                     "confidence": st.column_config.NumberColumn("Confidence", format="%.2f"),
                 },
