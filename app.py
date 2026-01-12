@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 9.6", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 9.7", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -298,7 +298,7 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         st.plotly_chart(fig, use_container_width=True)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 9.6")
+st.title("📊 Mithas Restaurant Intelligence 9.7")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
 
 if uploaded_file:
@@ -371,60 +371,66 @@ if uploaded_file:
             st.divider()
 
         def render_hourly_day_breakdown():
-            # REQ: Matrix (Pivot Table) for Daily Breakdown
             st.subheader("📅 Daily Hourly Breakdown (Matrix View)")
-            st.markdown("Drill down: **Day of Week** → **Specific Date** → **Hourly Matrix Table**.")
+            st.markdown("Drill down: **Day** → **Date** → **Category** → **Hourly Matrix**.")
             
+            # 1. Day Selection
             day_selected = st.selectbox("1. Select Day of Week", ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'])
             
-            # Filter Data by Day
             day_df = df[df['DayOfWeek'] == day_selected]
             
             if not day_df.empty:
-                # 2. Select Specific Date
+                # 2. Date Selection
                 unique_dates = sorted(day_df['Date'].dt.strftime('%Y-%m-%d').unique())
                 date_options = [f"All {day_selected}s Combined"] + unique_dates
                 date_selected = st.selectbox(f"2. Select Date ({day_selected})", date_options)
                 
-                # Filter Target Data
                 if date_selected == f"All {day_selected}s Combined":
                     target_df = day_df
-                    st.caption(f"Showing aggregated data for **ALL** {day_selected}s.")
                 else:
                     target_df = day_df[day_df['Date'].dt.strftime('%Y-%m-%d') == date_selected]
-                    st.caption(f"Showing data for **{date_selected}**.")
                 
-                # 3. Create Pivot Matrix
+                # 3. Category Selection (NEW)
+                unique_cats = sorted(df['Category'].unique())
+                cat_options = ["All Categories"] + unique_cats
+                category_selected = st.selectbox("3. Filter by Category", cat_options)
+                
+                if category_selected != "All Categories":
+                    target_df = target_df[target_df['Category'] == category_selected]
+                    st.caption(f"Showing **{category_selected}** items for **{date_selected}**.")
+                else:
+                    st.caption(f"Showing **All Items** for **{date_selected}**.")
+
+                # 4. Create Matrix
                 if not target_df.empty:
-                    # Filter 9am - 11pm (23)
+                    # Filter 9am - 11pm
                     target_df = target_df[(target_df['Hour'] >= 9) & (target_df['Hour'] <= 23)]
                     
                     if not target_df.empty:
-                        # Group & Pivot
+                        # Create Pivot Table
                         pivot = target_df.groupby(['ItemName', 'Hour'])['Quantity'].sum().unstack(fill_value=0)
                         
-                        # Ensure nice columns (9-10, 10-11)
-                        # We force columns 9 through 23 to exist so the table structure is consistent
+                        # Ensure columns 9-23 exist
                         for h in range(9, 24):
-                            if h not in pivot.columns:
-                                pivot[h] = 0
+                            if h not in pivot.columns: pivot[h] = 0
                         
-                        # Sort columns numerically
+                        # Sort columns
                         pivot = pivot[sorted(pivot.columns)]
                         
-                        # Rename to ranges "9-10"
+                        # Rename columns
                         pivot.columns = [f"{int(h)}-{int(h)+1}" for h in pivot.columns]
                         
                         # Add Total Column
                         pivot['Total Quantity'] = pivot.sum(axis=1)
                         
-                        # Sort rows by Total Quantity
+                        # Sort Rows
                         pivot = pivot.sort_values('Total Quantity', ascending=False)
                         
-                        # Display
                         st.dataframe(pivot, use_container_width=True, height=600)
                     else:
-                        st.warning("No sales found between 9:00 AM and 11:00 PM for this selection.")
+                        st.warning("No sales found in business hours (9am-11pm) for this selection.")
+                else:
+                    st.warning(f"No data found for Category: {category_selected} on this date.")
             else:
                 st.warning(f"No transactions found for {day_selected} in the uploaded file.")
             st.divider()
