@@ -1,8 +1,9 @@
 streamlit
 pandas
+numpy
 plotly
-mlxtend
 openpyxl
+mlxtend
 openai
 langchain
 langchain-core
@@ -12,3 +13,5 @@ scikit-learn
 matplotlib
 seaborn
 statsmodels
+prophet
+xgboost

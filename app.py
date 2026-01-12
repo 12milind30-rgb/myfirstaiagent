@@ -13,10 +13,17 @@ from datetime import timedelta
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import warnings
 
+# --- NEW IMPORTS FOR HYBRID MODEL ---
+from prophet import Prophet
+from xgboost import XGBRegressor
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Ridge
+from sklearn.preprocessing import StandardScaler
+
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 8.3", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 9.0", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -44,18 +51,14 @@ def load_data(file):
             df['Hour'] = 0
     return df
 
-# --- PARETO LOGIC (GLOBAL) ---
+# --- HELPER FUNCTIONS ---
+
 def get_pareto_items(df):
-    """Returns a list of items that contribute to 80% of total revenue"""
     item_rev = df.groupby('ItemName')['TotalAmount'].sum().sort_values(ascending=False).reset_index()
     total_revenue = item_rev['TotalAmount'].sum()
     item_rev['Cumulative'] = item_rev['TotalAmount'].cumsum()
     item_rev['CumPerc'] = 100 * item_rev['Cumulative'] / total_revenue
-    # Filter top 80% (cutoff)
-    pareto_items = item_rev[item_rev['CumPerc'] <= 80]['ItemName'].tolist()
-    return pareto_items
-
-# --- HELPER FUNCTIONS ---
+    return item_rev[item_rev['CumPerc'] <= 80]['ItemName'].tolist()
 
 def get_peak_hour_for_pair(df, item_a, item_b):
     orders_a = set(df[df['ItemName'] == item_a]['OrderID'])
@@ -82,27 +85,156 @@ def get_hourly_details(df):
     hourly_stats = hourly_stats.sort_values(['Hour', 'Quantity'], ascending=[True, False])
     return hourly_stats[['Time Slot', 'ItemName', 'Quantity', 'TotalAmount']]
 
-# --- ADVANCED ASSOCIATION ANALYSIS ---
+# --- ADVANCED HYBRID FORECASTER ---
+
+class HybridDemandForecaster:
+    def __init__(self, seasonality_mode='multiplicative'):
+        """
+        Initializes the 'Holy Trinity' Ensemble: Prophet + XGBoost + Random Forest.
+        """
+        # --- Model 1: Prophet (The Trend Expert) ---
+        self.prophet_model = Prophet(
+            seasonality_mode=seasonality_mode,
+            yearly_seasonality=True,
+            weekly_seasonality=True,
+            daily_seasonality=True
+        )
+        try:
+            self.prophet_model.add_country_holidays(country_name='IN')
+        except:
+            pass # Skip if holidays package not available
+
+        # --- Model 2: XGBoost (The Pattern Hunter) ---
+        self.xgb_model = XGBRegressor(
+            n_estimators=1000,
+            learning_rate=0.05,
+            max_depth=6,
+            early_stopping_rounds=50,
+            n_jobs=-1,
+            objective='reg:squarederror'
+        )
+
+        # --- Model 3: Random Forest (The Stabilizer) ---
+        self.rf_model = RandomForestRegressor(
+            n_estimators=200,
+            max_depth=10,
+            n_jobs=-1,
+            random_state=42
+        )
+
+        # --- Meta-Learner (The Boss) ---
+        self.meta_model = Ridge(alpha=1.0)
+        self.scaler = StandardScaler()
+
+        # State variables
+        self.last_training_date = None
+        self.training_data_tail = None 
+        self.is_fitted = False
+        self.feature_columns = []
+
+    def create_features(self, df, is_future=False):
+        """Creates Lags, Rolling Means, and Time features."""
+        df_feat = df.copy()
+        
+        # 1. Time Features
+        df_feat['hour'] = df_feat['ds'].dt.hour
+        df_feat['dayofweek'] = df_feat['ds'].dt.dayofweek
+        df_feat['quarter'] = df_feat['ds'].dt.quarter
+        df_feat['month'] = df_feat['ds'].dt.month
+        df_feat['is_weekend'] = df_feat['dayofweek'].apply(lambda x: 1 if x >= 5 else 0)
+
+        # 2. Lag Features
+        if 'y' in df_feat.columns:
+            df_feat['lag_1d'] = df_feat['y'].shift(24) # Same hour yesterday
+            df_feat['lag_7d'] = df_feat['y'].shift(24 * 7) # Same hour last week
+            df_feat['rolling_mean_3d'] = df_feat['y'].rolling(window=24*3).mean()
+            df_feat['rolling_std_7d'] = df_feat['y'].rolling(window=24*7).std()
+        
+        df_feat = df_feat.fillna(0)
+        return df_feat
+
+    def fit(self, df):
+        """Trains all 3 models and the Meta-Learner."""
+        self.last_training_date = df['ds'].max()
+        self.training_data_tail = df.tail(24 * 14).copy()
+
+        # Fit Prophet
+        self.prophet_model.fit(df)
+        
+        # Prepare ML Data
+        df_ml = self.create_features(df)
+        drop_cols = ['ds', 'y', 'yhat']
+        # Filter only existing columns for features
+        self.feature_columns = [c for c in df_ml.columns if c not in drop_cols and np.issubdtype(df_ml[c].dtype, np.number)]
+        
+        X = df_ml[self.feature_columns]
+        y = df['y']
+
+        # Fit ML Models
+        # XGBoost requires eval_set for early stopping, but we'll skip for simplicity in Streamlit
+        self.xgb_model.fit(X, y, verbose=False)
+        self.rf_model.fit(X, y)
+        
+        # Meta-Learner Training
+        pred_prophet = self.prophet_model.predict(df)['yhat'].values
+        pred_xgb = self.xgb_model.predict(X)
+        pred_rf = self.rf_model.predict(X)
+        
+        stacked_X = np.column_stack((pred_prophet, pred_xgb, pred_rf))
+        self.meta_model.fit(stacked_X, y)
+        
+        self.is_fitted = True
+
+    def predict(self, periods=30):
+        """Predicts future demand."""
+        if not self.is_fitted: raise Exception("Model not fitted yet.")
+
+        # 1. Prophet Future
+        future_prophet = self.prophet_model.make_future_dataframe(periods=periods, freq='D')
+        forecast_prophet = self.prophet_model.predict(future_prophet)
+        
+        # 2. ML Future
+        future_dates = future_prophet.tail(periods).copy()
+        # Create extended dataframe to calculate lags
+        extended_df = pd.concat([self.training_data_tail, future_dates], axis=0, ignore_index=True)
+        # We need to fill 'y' with 0 or last known value for the future part to generate features, 
+        # but create_features handles shifts based on index.
+        extended_feat = self.create_features(extended_df, is_future=True)
+        
+        # Extract the future rows
+        X_future = extended_feat.tail(periods)[self.feature_columns]
+        
+        # 3. Individual Predictions
+        pred_prophet = forecast_prophet['yhat'].tail(periods).values
+        pred_xgb = self.xgb_model.predict(X_future)
+        pred_rf = self.rf_model.predict(X_future)
+        
+        # 4. Meta Consensus
+        stacked_future = np.column_stack((pred_prophet, pred_xgb, pred_rf))
+        final_pred = self.meta_model.predict(stacked_future)
+        
+        # 5. Result
+        result = future_dates[['ds']].copy()
+        result['Predicted_Demand'] = np.maximum(final_pred, 0)
+        result['Prophet_View'] = pred_prophet
+        result['XGB_View'] = pred_xgb
+        result['RF_View'] = pred_rf
+        
+        return result
+
+# --- COMBO & ASSOCIATION LOGIC ---
 
 def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
-    # 1. One-Hot Encoding
     basket = df.groupby(['OrderID', level])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID')
     basket_sets = basket.applymap(lambda x: True if x > 0 else False)
-    
-    # 2. FP-Growth
     frequent_itemsets = fpgrowth(basket_sets, min_support=min_sup, use_colnames=True)
-    
     if frequent_itemsets.empty: return pd.DataFrame()
-    
-    # 3. Generate Rules
     rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_conf)
     
-    # 4. Add Metrics
     total_orders = df['OrderID'].nunique()
     rules['No. of Orders'] = (rules['support'] * total_orders).astype(int)
     rules['Support (%)'] = rules['support'] * 100
     
-    # 5. Zhang's Metric
     def zhangs_metric(rule):
         sup = rule['support']
         sup_a = rule['antecedent support']
@@ -113,18 +245,14 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
         return numerator / denominator
 
     rules['zhang'] = rules.apply(zhangs_metric, axis=1)
-    
-    # Format
     rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
-    
     return rules[['Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang', 'conviction']]
 
-# --- COMBO LOGIC ---
 def get_combo_analysis_full(df):
     basket = (df.groupby(['OrderID', 'ItemName'])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID'))
     basket_sets = basket.applymap(lambda x: 1 if x > 0 else 0)
-    frequent = apriori(basket_sets, min_support=0.005, use_colnames=True) 
+    frequent = apriori(basket_sets, min_support=0.005, use_colnames=True)
     if frequent.empty: return pd.DataFrame()
     rules = association_rules(frequent, metric="lift", min_threshold=1.05)
     rules['Item A'] = rules['antecedents'].apply(lambda x: list(x)[0])
@@ -142,14 +270,12 @@ def get_combo_analysis_full(df):
 
 def get_part3_strategy(rules_df):
     if rules_df.empty: return pd.DataFrame(), pd.DataFrame()
-    # Proven: Top 10 by Frequency
     proven = rules_df.sort_values('Times Sold Together', ascending=False).head(10).copy()
-    # Potential: High Lift (>1.5) but not in top 10
     potential = rules_df[~rules_df.index.isin(proven.index)]
     potential = potential[potential['lift'] > 1.5].sort_values('lift', ascending=False).head(10).copy()
     return proven, potential
 
-# --- ANALYTICS MODULES ---
+# --- ANALYTICS MODULES (EXISTING) ---
 def get_overview_metrics(df):
     total_rev = df['TotalAmount'].sum()
     total_orders = df['OrderID'].nunique()
@@ -164,9 +290,7 @@ def get_star_items_with_hours(df, limit_n):
     total_rev = df['TotalAmount'].sum()
     item_stats = df.groupby('ItemName').agg({'TotalAmount': 'sum'}).reset_index()
     item_stats['Contribution %'] = (item_stats['TotalAmount'] / total_rev) * 100
-    # Apply limit from Slider
     item_stats = item_stats.sort_values('TotalAmount', ascending=False).head(limit_n)
-    
     peak_hours, peak_qtys = [], []
     for item in item_stats['ItemName']:
         item_data = df[df['ItemName'] == item]
@@ -195,7 +319,6 @@ def get_contribution_lists(df):
     cat_df = df.groupby('Category')['TotalAmount'].sum().reset_index()
     cat_df['Contribution'] = (cat_df['TotalAmount'] / total_rev) * 100
     cat_df = cat_df.sort_values('TotalAmount', ascending=False)
-    # Item Level Removed per request
     return cat_df
 
 def analyze_pareto_hierarchical(df):
@@ -222,56 +345,23 @@ def plot_time_series_fixed(df, pareto_list, n_items):
     for cat in categories:
         st.subheader(f"📈 {cat}")
         cat_data = df[df['Category'] == cat]
-        
-        # Sort by Revenue Contribution, Limit to Slider N
         top_items = cat_data.groupby('ItemName')['TotalAmount'].sum().sort_values(ascending=False).head(n_items).index.tolist()
-        
         subset = cat_data[cat_data['ItemName'].isin(top_items)]
         daily = subset.groupby(['Date', 'ItemName'])['Quantity'].sum().reset_index()
         if daily.empty: continue
-        
-        # Mark Pareto Items in Legend
         daily['Legend Name'] = daily['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
-        
         fig = px.line(daily, x='Date', y='Quantity', color='Legend Name', markers=True)
-        for item in top_items:
-            avg_val = daily[daily['ItemName'] == item]['Quantity'].mean()
-            # fig.add_hline(y=avg_val, line_dash="dot", line_color="grey", opacity=0.3) 
-            # Commented out average line to avoid clutter with 30 items
-            
         fig.update_xaxes(dtick="D2", tickformat="%d %b (%a)")
         fig.update_yaxes(matches=None, showticklabels=True)
         st.plotly_chart(fig, use_container_width=True)
 
-def advanced_forecast(df):
-    daily = df.groupby(['Date', 'ItemName'])['Quantity'].sum().reset_index()
-    top_cats = df.groupby('Category')['TotalAmount'].sum().nlargest(10).index.tolist()
-    forecast_results = []
-    for cat in top_cats:
-        cat_df = df[df['Category'] == cat]
-        top_items = cat_df.groupby('ItemName')['Quantity'].sum().nlargest(10).index.tolist()
-        for item in top_items:
-            item_data = daily[daily['ItemName'] == item].set_index('Date')['Quantity']
-            idx = pd.date_range(item_data.index.min(), item_data.index.max())
-            item_data = item_data.reindex(idx, fill_value=0)
-            try:
-                if len(item_data) > 14:
-                    model = ExponentialSmoothing(item_data, trend='add', seasonal='add', seasonal_periods=7).fit()
-                    pred = model.forecast(30)
-                else:
-                    pred = pd.Series([item_data.mean()] * 30, index=pd.date_range(item_data.index.max() + timedelta(days=1), periods=30))
-                total_expected_demand = pred.sum()
-                forecast_results.append({'Category': cat, 'ItemName': item, 'Total Predicted Demand (Next 30 Days)': round(total_expected_demand, 0)})
-            except: continue
-    return pd.DataFrame(forecast_results)
-
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 8.3")
+st.title("📊 Mithas Restaurant Intelligence 9.0")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data", type=['xlsx'])
 
 if uploaded_file:
     df = load_data(uploaded_file)
-    pareto_list = get_pareto_items(df) # Get list of 80% contributors
+    pareto_list = get_pareto_items(df)
     pareto_count = len(pareto_list)
     
     tab1, tab_cat, tab2, tab3, tab4, tab_assoc, tab5, tab6 = st.tabs([
@@ -340,38 +430,25 @@ if uploaded_file:
 
         def render_contributions():
             cat_cont = get_contribution_lists(df)
-            st.subheader("📂 Category Contribution (Pie Chart)")
-            # REQ 3: Converted table to Pie Chart
+            st.subheader("📂 Category Contribution")
             fig_pie = px.pie(cat_cont, values='TotalAmount', names='Category', hole=0.3)
             st.plotly_chart(fig_pie, use_container_width=True)
             st.divider()
 
         def render_star_items():
             st.subheader("⭐ Top Star Items & Selling Hours")
-            # REQ 3: Slider for Star Items (Min 10, Max Pareto Count)
             slider_max = max(10, pareto_count)
             n_star = st.slider("Select Number of Star Items", 10, slider_max, 20)
-            
             star_df = get_star_items_with_hours(df, n_star)
-            
-            # Apply formatting for Pareto Items
             star_df['Item Name'] = star_df['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
-            
-            st.dataframe(
-                star_df[['Item Name', 'TotalAmount', 'Contribution %', 'Peak Selling Hour', 'Qty Sold (Peak)']],
-                column_config={
-                    "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"),
-                    "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%"),
-                },
-                hide_index=True,
-                use_container_width=True
-            )
+            st.dataframe(star_df[['Item Name', 'TotalAmount', 'Contribution %', 'Peak Selling Hour', 'Qty Sold (Peak)']], 
+                         column_config={"TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"), "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%")}, hide_index=True, use_container_width=True)
 
         block_map = {"Metrics": render_metrics, "Graphs": render_graphs, "Hourly Breakdown (9am-11pm)": render_hourly_details, "Peak Items List": render_peak_list, "Contributions": render_contributions, "Star Items": render_star_items}
         for block_name in overview_order:
             if block_name in block_map: block_map[block_name]()
 
-    # --- TAB: CATEGORY DETAILS (UNCHANGED) ---
+    # --- TAB: CATEGORY DETAILS ---
     with tab_cat:
         st.header("📂 Category Deep-Dive")
         cats = df['Category'].unique()
@@ -382,40 +459,31 @@ if uploaded_file:
             cat_stats = cat_data.groupby('ItemName').agg({'TotalAmount': 'sum', 'Quantity': 'sum'}).reset_index()
             cat_stats['Contribution %'] = (cat_stats['TotalAmount'] / total_business_rev) * 100
             cat_stats = cat_stats.sort_values('TotalAmount', ascending=False)
-            
-            # Highlight Pareto
             cat_stats['Item Name'] = cat_stats['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
-            
             st.dataframe(cat_stats[['Item Name', 'TotalAmount', 'Quantity', 'Contribution %']], column_config={"TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"), "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%")}, hide_index=True, use_container_width=True)
             st.divider()
 
-    # --- TAB 2: PARETO (UNCHANGED) ---
+    # --- TAB 2: PARETO ---
     with tab2:
         st.header("🏆 Pareto Analysis")
         pareto_df, ratio_msg, menu_perc = analyze_pareto_hierarchical(df)
         st.info(f"💡 **Insight:** {ratio_msg} (Only {menu_perc:.1f}% of your menu!)")
-        
-        # Highlight
         pareto_df['ItemName'] = pareto_df['ItemName'].apply(lambda x: f"★ {x}")
-        
         st.dataframe(pareto_df, column_config={"CatContrib": st.column_config.NumberColumn("Category Share %", format="%.2f%%"), "ItemContrib": st.column_config.NumberColumn("Item Share % (Global)", format="%.2f%%"), "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")}, hide_index=True, height=600, use_container_width=True)
 
-    # --- TAB 3: TIME SERIES (UPDATED) ---
+    # --- TAB 3: TIME SERIES ---
     with tab3:
         st.header("📅 Daily Trends")
-        # REQ 4: Slider for Time Series
         n_ts = st.slider("Number of items per category (Top N by Revenue)", 5, 30, 5)
         plot_time_series_fixed(df, pareto_list, n_ts)
 
-    # --- TAB 4: SMART COMBOS (UNCHANGED) ---
+    # --- TAB 4: SMART COMBOS ---
     with tab4:
         st.header("🍔 Smart Combo Strategy")
         with st.expander("🛠️ Reorder Combo Layout"):
             combo_order = st.multiselect("Section Order", ["Part 1: Full Combo Map", "Part 3: Strategic Recommendations"], default=["Part 1: Full Combo Map", "Part 3: Strategic Recommendations"])
         rules_df = get_combo_analysis_full(df)
         proven_df, potential_df = get_part3_strategy(rules_df)
-        
-        # We need these lists for Association Tab
         proven_list = []
         potential_list = []
         if not proven_df.empty: proven_list = proven_df['pair'].tolist()
@@ -442,10 +510,9 @@ if uploaded_file:
         for block in combo_order:
             if block in combo_map: combo_map[block]()
     
-    # --- TAB 5: ASSOCIATION ANALYSIS (HIGHLIGHTS) ---
+    # --- TAB 5: ASSOCIATION ANALYSIS ---
     with tab_assoc:
-        st.header("🧬 Scientific Association Analysis (FP-Growth)")
-        
+        st.header("🧬 Scientific Association Analysis")
         c1, c2 = st.columns(2)
         with c1:
             analysis_level = st.radio("Analysis Level", ["ItemName", "Category"], horizontal=True)
@@ -458,54 +525,71 @@ if uploaded_file:
         if not assoc_rules.empty:
             assoc_rules = assoc_rules.sort_values('lift', ascending=False).head(50)
             
-            # REQ 1: Highlight Winners/Gems
             def get_status(row):
-                # Create sorted tuple for comparison
                 current_pair = tuple(sorted([row['Antecedent'], row['Consequent']]))
-                if current_pair in proven_list:
-                    return "🔥 Proven Winner"
-                elif current_pair in potential_list:
-                    return "💎 Hidden Gem"
+                if current_pair in proven_list: return "🔥 Proven Winner"
+                elif current_pair in potential_list: return "💎 Hidden Gem"
                 return "Normal"
 
-            # Apply logic only if we are at Item Level (lists match)
             if analysis_level == 'ItemName':
                 assoc_rules['Status'] = assoc_rules.apply(get_status, axis=1)
+                assoc_rules['Antecedent'] = assoc_rules['Antecedent'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
+                assoc_rules['Consequent'] = assoc_rules['Consequent'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
             else:
                 assoc_rules['Status'] = "Category Level"
 
-            st.dataframe(
-                assoc_rules[['Status', 'Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang']],
-                column_config={
-                    "Status": st.column_config.TextColumn("Strategic Status"),
-                    "Support (%)": st.column_config.NumberColumn("Support %", format="%.2f"),
-                    "No. of Orders": st.column_config.NumberColumn("Orders", format="%d"),
-                    "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"),
-                    "lift": st.column_config.NumberColumn("Lift", format="%.2f"),
-                    "confidence": st.column_config.NumberColumn("Confidence", format="%.2f"),
-                },
-                hide_index=True, use_container_width=True, height=600
-            )
-            
-            fig = px.scatter(
-                assoc_rules, x="Support (%)", y="confidence", 
-                size="lift", color="zhang",
-                hover_data=["Antecedent", "Consequent", "No. of Orders"],
-                title=f"Association Rules Landscape ({analysis_level} Level)",
-                color_continuous_scale=px.colors.diverging.RdBu
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-        else:
-            st.warning("No rules found. Try lowering the 'Minimum Support' slider.")
+            st.dataframe(assoc_rules[['Status', 'Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang']], column_config={"Status": st.column_config.TextColumn("Strategic Status"), "Support (%)": st.column_config.NumberColumn("Support %", format="%.2f"), "No. of Orders": st.column_config.NumberColumn("Orders", format="%d"), "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"), "lift": st.column_config.NumberColumn("Lift", format="%.2f")}, hide_index=True, use_container_width=True, height=600)
+        else: st.warning("No rules found.")
 
-    # --- TABS 5 & 6 (UNCHANGED) ---
+    # --- TAB 7: DEMAND FORECAST (HYBRID UPGRADE) ---
     with tab5:
-        st.header("🔮 Demand Prediction")
-        with st.spinner("Training..."):
-            forecast_data = advanced_forecast(df)
-        if not forecast_data.empty: st.dataframe(forecast_data.sort_values(['Category', 'Total Predicted Demand (Next 30 Days)'], ascending=[True, False]), use_container_width=True, hide_index=True)
+        st.header("🔮 Demand Prediction (Ensemble AI)")
+        st.markdown("**Model:** Hybrid Ensemble (Prophet + XGBoost + Random Forest + Meta-Learner).")
+        
+        # 1. Select Item
+        all_items = df['ItemName'].unique()
+        selected_item = st.selectbox("Select Item to Forecast", all_items)
+        
+        if st.button("Generate AI Forecast"):
+            with st.spinner(f"Training AI Models for {selected_item}..."):
+                # Filter Data
+                item_df = df[df['ItemName'] == selected_item].groupby('Date')['Quantity'].sum().reset_index()
+                item_df.columns = ['ds', 'y'] # Prophet format
+                
+                # Check Data Length
+                if len(item_df) < 14:
+                    st.error(f"⚠️ Not enough history for {selected_item} (Need 14+ days). Model cannot train.")
+                else:
+                    try:
+                        # Train Hybrid Model
+                        forecaster = HybridDemandForecaster()
+                        forecaster.fit(item_df)
+                        forecast = forecaster.predict(periods=30)
+                        
+                        # Visualization
+                        st.subheader(f"Forecast for {selected_item}")
+                        
+                        # Plotly Chart
+                        fig = go.Figure()
+                        # Historical Data
+                        fig.add_trace(go.Scatter(x=item_df['ds'], y=item_df['y'], mode='markers', name='Actual Sales', marker=dict(color='gray', opacity=0.5, size=8)))
+                        # Final Ensemble Prediction
+                        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['Predicted_Demand'], mode='lines+markers', name='Ensemble Prediction', line=dict(color='#00CC96', width=3)))
+                        # Components (Hidden by default, toggle in legend)
+                        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['Prophet_View'], mode='lines', name='Prophet View', line=dict(dash='dot', color='blue', width=1), visible='legendonly'))
+                        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['XGB_View'], mode='lines', name='XGBoost View', line=dict(dash='dot', color='red', width=1), visible='legendonly'))
+                        
+                        fig.update_layout(title="30-Day Demand Forecast", xaxis_title="Date", yaxis_title="Predicted Quantity", template="plotly_white")
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Data Table
+                        st.markdown("#### Detailed Forecast Data")
+                        st.dataframe(forecast[['ds', 'Predicted_Demand', 'Prophet_View', 'XGB_View']], hide_index=True, use_container_width=True)
+                        
+                    except Exception as e:
+                        st.error(f"Modeling Error: {e}")
 
+    # --- TAB 8: AI CHAT (UNCHANGED) ---
     with tab6:
         st.subheader("🤖 Manager Chat")
         if "messages" not in st.session_state: st.session_state.messages = []
