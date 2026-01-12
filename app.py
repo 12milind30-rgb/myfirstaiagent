@@ -569,7 +569,6 @@ if uploaded_file:
     # --- TAB 7: DEMAND FORECAST (WITH SPECIFIC UPLOADER) ---
     with tab5:
         st.header("🔮 Demand Prediction (Ensemble AI)")
-        st.markdown("**Model:** Hybrid Ensemble (Prophet + XGBoost + Random Forest + Meta-Learner).")
         st.markdown("---")
         
         # 1. SPECIFIC UPLOADER FOR FORECAST
