@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 9.0", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 9.1", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -102,7 +102,7 @@ class HybridDemandForecaster:
         try:
             self.prophet_model.add_country_holidays(country_name='IN')
         except:
-            pass # Skip if holidays package not available
+            pass 
 
         # --- Model 2: XGBoost (The Pattern Hunter) ---
         self.xgb_model = XGBRegressor(
@@ -145,8 +145,8 @@ class HybridDemandForecaster:
 
         # 2. Lag Features
         if 'y' in df_feat.columns:
-            df_feat['lag_1d'] = df_feat['y'].shift(24) # Same hour yesterday
-            df_feat['lag_7d'] = df_feat['y'].shift(24 * 7) # Same hour last week
+            df_feat['lag_1d'] = df_feat['y'].shift(24) 
+            df_feat['lag_7d'] = df_feat['y'].shift(24 * 7) 
             df_feat['rolling_mean_3d'] = df_feat['y'].rolling(window=24*3).mean()
             df_feat['rolling_std_7d'] = df_feat['y'].rolling(window=24*7).std()
         
@@ -164,14 +164,12 @@ class HybridDemandForecaster:
         # Prepare ML Data
         df_ml = self.create_features(df)
         drop_cols = ['ds', 'y', 'yhat']
-        # Filter only existing columns for features
         self.feature_columns = [c for c in df_ml.columns if c not in drop_cols and np.issubdtype(df_ml[c].dtype, np.number)]
         
         X = df_ml[self.feature_columns]
         y = df['y']
 
         # Fit ML Models
-        # XGBoost requires eval_set for early stopping, but we'll skip for simplicity in Streamlit
         self.xgb_model.fit(X, y, verbose=False)
         self.rf_model.fit(X, y)
         
@@ -195,13 +193,9 @@ class HybridDemandForecaster:
         
         # 2. ML Future
         future_dates = future_prophet.tail(periods).copy()
-        # Create extended dataframe to calculate lags
         extended_df = pd.concat([self.training_data_tail, future_dates], axis=0, ignore_index=True)
-        # We need to fill 'y' with 0 or last known value for the future part to generate features, 
-        # but create_features handles shifts based on index.
         extended_feat = self.create_features(extended_df, is_future=True)
         
-        # Extract the future rows
         X_future = extended_feat.tail(periods)[self.feature_columns]
         
         # 3. Individual Predictions
@@ -356,8 +350,8 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         st.plotly_chart(fig, use_container_width=True)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 9.0")
-uploaded_file = st.sidebar.file_uploader("Upload Monthly Data", type=['xlsx'])
+st.title("📊 Mithas Restaurant Intelligence 9.1")
+uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
 
 if uploaded_file:
     df = load_data(uploaded_file)
@@ -541,53 +535,60 @@ if uploaded_file:
             st.dataframe(assoc_rules[['Status', 'Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang']], column_config={"Status": st.column_config.TextColumn("Strategic Status"), "Support (%)": st.column_config.NumberColumn("Support %", format="%.2f"), "No. of Orders": st.column_config.NumberColumn("Orders", format="%d"), "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"), "lift": st.column_config.NumberColumn("Lift", format="%.2f")}, hide_index=True, use_container_width=True, height=600)
         else: st.warning("No rules found.")
 
-    # --- TAB 7: DEMAND FORECAST (HYBRID UPGRADE) ---
+    # --- TAB 7: DEMAND FORECAST (WITH SPECIFIC UPLOADER) ---
     with tab5:
-        st.header("🔮 Demand Prediction (Ensemble AI)")
-        st.markdown("**Model:** Hybrid Ensemble (Prophet + XGBoost + Random Forest + Meta-Learner).")
+        st.header("🔮 Demand Prediction")
+        st.markdown("---")
         
-        # 1. Select Item
-        all_items = df['ItemName'].unique()
-        selected_item = st.selectbox("Select Item to Forecast", all_items)
+        # 1. SPECIFIC UPLOADER FOR FORECAST
+        forecast_file = st.file_uploader("Upload Historical Master File (Recommended: 3+ Months Data)", type=['xlsx'], key='forecast_uploader')
         
-        if st.button("Generate AI Forecast"):
-            with st.spinner(f"Training AI Models for {selected_item}..."):
-                # Filter Data
-                item_df = df[df['ItemName'] == selected_item].groupby('Date')['Quantity'].sum().reset_index()
-                item_df.columns = ['ds', 'y'] # Prophet format
-                
-                # Check Data Length
-                if len(item_df) < 14:
-                    st.error(f"⚠️ Not enough history for {selected_item} (Need 14+ days). Model cannot train.")
-                else:
-                    try:
-                        # Train Hybrid Model
-                        forecaster = HybridDemandForecaster()
-                        forecaster.fit(item_df)
-                        forecast = forecaster.predict(periods=30)
-                        
-                        # Visualization
-                        st.subheader(f"Forecast for {selected_item}")
-                        
-                        # Plotly Chart
-                        fig = go.Figure()
-                        # Historical Data
-                        fig.add_trace(go.Scatter(x=item_df['ds'], y=item_df['y'], mode='markers', name='Actual Sales', marker=dict(color='gray', opacity=0.5, size=8)))
-                        # Final Ensemble Prediction
-                        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['Predicted_Demand'], mode='lines+markers', name='Ensemble Prediction', line=dict(color='#00CC96', width=3)))
-                        # Components (Hidden by default, toggle in legend)
-                        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['Prophet_View'], mode='lines', name='Prophet View', line=dict(dash='dot', color='blue', width=1), visible='legendonly'))
-                        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['XGB_View'], mode='lines', name='XGBoost View', line=dict(dash='dot', color='red', width=1), visible='legendonly'))
-                        
-                        fig.update_layout(title="30-Day Demand Forecast", xaxis_title="Date", yaxis_title="Predicted Quantity", template="plotly_white")
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Data Table
-                        st.markdown("#### Detailed Forecast Data")
-                        st.dataframe(forecast[['ds', 'Predicted_Demand', 'Prophet_View', 'XGB_View']], hide_index=True, use_container_width=True)
-                        
-                    except Exception as e:
-                        st.error(f"Modeling Error: {e}")
+        # Determine which dataframe to use
+        df_to_use = None
+        if forecast_file:
+            df_to_use = load_data(forecast_file)
+            st.success("✅ Using Master History File for Training")
+        elif df is not None:
+            df_to_use = df
+            st.warning("⚠️ Using Sidebar File (Short-term data). Accuracy may be low without history.")
+        
+        if df_to_use is not None:
+            # 2. Select Item
+            all_items = df_to_use['ItemName'].unique()
+            selected_item = st.selectbox("Select Item to Forecast", all_items)
+            
+            if st.button("Generate AI Forecast"):
+                with st.spinner(f"Training AI Models for {selected_item}..."):
+                    # Filter Data
+                    item_df = df_to_use[df_to_use['ItemName'] == selected_item].groupby('Date')['Quantity'].sum().reset_index()
+                    item_df.columns = ['ds', 'y'] # Prophet format
+                    
+                    if len(item_df) < 14:
+                        st.error(f"⚠️ Not enough history for {selected_item} (Need 14+ days). Model cannot train.")
+                    else:
+                        try:
+                            forecaster = HybridDemandForecaster()
+                            forecaster.fit(item_df)
+                            forecast = forecaster.predict(periods=30)
+                            
+                            st.subheader(f"Forecast for {selected_item}")
+                            
+                            fig = go.Figure()
+                            fig.add_trace(go.Scatter(x=item_df['ds'], y=item_df['y'], mode='markers', name='Actual Sales', marker=dict(color='gray', opacity=0.5, size=8)))
+                            fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['Predicted_Demand'], mode='lines+markers', name='Ensemble Prediction', line=dict(color='#00CC96', width=3)))
+                            fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['Prophet_View'], mode='lines', name='Prophet View', line=dict(dash='dot', color='blue', width=1), visible='legendonly'))
+                            fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['XGB_View'], mode='lines', name='XGBoost View', line=dict(dash='dot', color='red', width=1), visible='legendonly'))
+                            
+                            fig.update_layout(title="30-Day Demand Forecast", xaxis_title="Date", yaxis_title="Predicted Quantity", template="plotly_white")
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            st.markdown("#### Detailed Forecast Data")
+                            st.dataframe(forecast[['ds', 'Predicted_Demand', 'Prophet_View', 'XGB_View']], hide_index=True, use_container_width=True)
+                            
+                        except Exception as e:
+                            st.error(f"Modeling Error: {e}")
+        else:
+            st.info("Please upload data to begin forecasting.")
 
     # --- TAB 8: AI CHAT (UNCHANGED) ---
     with tab6:
