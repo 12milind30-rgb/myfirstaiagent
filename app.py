@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 9.1", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 9.2", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -350,7 +350,7 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         st.plotly_chart(fig, use_container_width=True)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 9.1")
+st.title("📊 Mithas Restaurant Intelligence 9.2")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
 
 if uploaded_file:
@@ -404,8 +404,12 @@ if uploaded_file:
                 time_slots = hourly_df['Time Slot'].unique()
                 for slot in time_slots:
                     slot_data = hourly_df[hourly_df['Time Slot'] == slot]
+                    # FIX: Calculated Top Item and Units to show in Header
                     total_rev = slot_data['TotalAmount'].sum()
-                    with st.expander(f"⏰ {slot}  |  Revenue: ₹{total_rev:,.0f}"):
+                    total_qty = slot_data['Quantity'].sum()
+                    top_item = slot_data.sort_values('Quantity', ascending=False).iloc[0]['ItemName']
+                    
+                    with st.expander(f"⏰ {slot}  |  Revenue: ₹{total_rev:,.0f}  |  Units: {total_qty}  |  Top: {top_item}"):
                         st.dataframe(slot_data[['ItemName', 'Quantity', 'TotalAmount']], hide_index=True, use_container_width=True)
             st.divider()
 
