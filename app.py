@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 9.4", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 9.5", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -89,131 +89,69 @@ def get_hourly_details(df):
 
 class HybridDemandForecaster:
     def __init__(self, seasonality_mode='multiplicative'):
-        """
-        Initializes the 'Holy Trinity' Ensemble: Prophet + XGBoost + Random Forest.
-        """
-        # --- Model 1: Prophet (The Trend Expert) ---
-        self.prophet_model = Prophet(
-            seasonality_mode=seasonality_mode,
-            yearly_seasonality=True,
-            weekly_seasonality=True,
-            daily_seasonality=True
-        )
-        try:
-            self.prophet_model.add_country_holidays(country_name='IN')
-        except:
-            pass 
-
-        # --- Model 2: XGBoost (The Pattern Hunter) ---
-        self.xgb_model = XGBRegressor(
-            n_estimators=1000,
-            learning_rate=0.05,
-            max_depth=6,
-            early_stopping_rounds=50,
-            n_jobs=-1,
-            objective='reg:squarederror'
-        )
-
-        # --- Model 3: Random Forest (The Stabilizer) ---
-        self.rf_model = RandomForestRegressor(
-            n_estimators=200,
-            max_depth=10,
-            n_jobs=-1,
-            random_state=42
-        )
-
-        # --- Meta-Learner (The Boss) ---
+        self.prophet_model = Prophet(seasonality_mode=seasonality_mode, yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=True)
+        try: self.prophet_model.add_country_holidays(country_name='IN')
+        except: pass 
+        self.xgb_model = XGBRegressor(n_estimators=1000, learning_rate=0.05, max_depth=6, early_stopping_rounds=50, n_jobs=-1, objective='reg:squarederror')
+        self.rf_model = RandomForestRegressor(n_estimators=200, max_depth=10, n_jobs=-1, random_state=42)
         self.meta_model = Ridge(alpha=1.0)
         self.scaler = StandardScaler()
-
-        # State variables
         self.last_training_date = None
         self.training_data_tail = None 
         self.is_fitted = False
         self.feature_columns = []
 
     def create_features(self, df, is_future=False):
-        """Creates Lags, Rolling Means, and Time features."""
         df_feat = df.copy()
-        
-        # 1. Time Features
         df_feat['hour'] = df_feat['ds'].dt.hour
         df_feat['dayofweek'] = df_feat['ds'].dt.dayofweek
         df_feat['quarter'] = df_feat['ds'].dt.quarter
         df_feat['month'] = df_feat['ds'].dt.month
         df_feat['is_weekend'] = df_feat['dayofweek'].apply(lambda x: 1 if x >= 5 else 0)
-
-        # 2. Lag Features
         if 'y' in df_feat.columns:
             df_feat['lag_1d'] = df_feat['y'].shift(24) 
             df_feat['lag_7d'] = df_feat['y'].shift(24 * 7) 
             df_feat['rolling_mean_3d'] = df_feat['y'].rolling(window=24*3).mean()
             df_feat['rolling_std_7d'] = df_feat['y'].rolling(window=24*7).std()
-        
         df_feat = df_feat.fillna(0)
         return df_feat
 
     def fit(self, df):
-        """Trains all 3 models and the Meta-Learner."""
         self.last_training_date = df['ds'].max()
         self.training_data_tail = df.tail(24 * 14).copy()
-
-        # Fit Prophet
         self.prophet_model.fit(df)
-        
-        # Prepare ML Data
         df_ml = self.create_features(df)
         drop_cols = ['ds', 'y', 'yhat']
         self.feature_columns = [c for c in df_ml.columns if c not in drop_cols and np.issubdtype(df_ml[c].dtype, np.number)]
-        
         X = df_ml[self.feature_columns]
         y = df['y']
-
-        # Fit ML Models
         self.xgb_model.fit(X, y, verbose=False)
         self.rf_model.fit(X, y)
-        
-        # Meta-Learner Training
         pred_prophet = self.prophet_model.predict(df)['yhat'].values
         pred_xgb = self.xgb_model.predict(X)
         pred_rf = self.rf_model.predict(X)
-        
         stacked_X = np.column_stack((pred_prophet, pred_xgb, pred_rf))
         self.meta_model.fit(stacked_X, y)
-        
         self.is_fitted = True
 
     def predict(self, periods=30):
-        """Predicts future demand."""
         if not self.is_fitted: raise Exception("Model not fitted yet.")
-
-        # 1. Prophet Future
         future_prophet = self.prophet_model.make_future_dataframe(periods=periods, freq='D')
         forecast_prophet = self.prophet_model.predict(future_prophet)
-        
-        # 2. ML Future
         future_dates = future_prophet.tail(periods).copy()
         extended_df = pd.concat([self.training_data_tail, future_dates], axis=0, ignore_index=True)
         extended_feat = self.create_features(extended_df, is_future=True)
-        
         X_future = extended_feat.tail(periods)[self.feature_columns]
-        
-        # 3. Individual Predictions
         pred_prophet = forecast_prophet['yhat'].tail(periods).values
         pred_xgb = self.xgb_model.predict(X_future)
         pred_rf = self.rf_model.predict(X_future)
-        
-        # 4. Meta Consensus
         stacked_future = np.column_stack((pred_prophet, pred_xgb, pred_rf))
         final_pred = self.meta_model.predict(stacked_future)
-        
-        # 5. Result
         result = future_dates[['ds']].copy()
         result['Predicted_Demand'] = np.maximum(final_pred, 0)
         result['Prophet_View'] = pred_prophet
         result['XGB_View'] = pred_xgb
         result['RF_View'] = pred_rf
-        
         return result
 
 # --- COMBO & ASSOCIATION LOGIC ---
@@ -224,11 +162,9 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     frequent_itemsets = fpgrowth(basket_sets, min_support=min_sup, use_colnames=True)
     if frequent_itemsets.empty: return pd.DataFrame()
     rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_conf)
-    
     total_orders = df['OrderID'].nunique()
     rules['No. of Orders'] = (rules['support'] * total_orders).astype(int)
     rules['Support (%)'] = rules['support'] * 100
-    
     def zhangs_metric(rule):
         sup = rule['support']
         sup_a = rule['antecedent support']
@@ -237,7 +173,6 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
         denominator = max(sup * (1 - sup_a), sup_a * (sup_c - sup))
         if denominator == 0: return 0
         return numerator / denominator
-
     rules['zhang'] = rules.apply(zhangs_metric, axis=1)
     rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
@@ -346,7 +281,7 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         daily['Legend Name'] = daily['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
         fig = px.line(daily, x='Date', y='Quantity', color='Legend Name', markers=True)
         
-        # RESTORED AVERAGE LINE AND ANNOTATION
+        # AVERAGE LINE
         for item in top_items:
             avg_val = daily[daily['ItemName'] == item]['Quantity'].mean()
             fig.add_hline(y=avg_val, line_dash="dot", line_color="grey", opacity=0.5)
@@ -361,7 +296,7 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         st.plotly_chart(fig, use_container_width=True)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 9.4")
+st.title("📊 Mithas Restaurant Intelligence 9.5")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
 
 if uploaded_file:
@@ -379,8 +314,8 @@ if uploaded_file:
         with st.expander("🛠️ Reorder Page Layout", expanded=False):
             overview_order = st.multiselect(
                 "Select order of sections:",
-                ["Metrics", "Graphs", "Hourly Breakdown (9am-11pm)", "Peak Items List", "Contributions", "Star Items"],
-                default=["Metrics", "Graphs", "Hourly Breakdown (9am-11pm)", "Peak Items List", "Contributions", "Star Items"]
+                ["Metrics", "Graphs", "Hourly Breakdown (Aggregated)", "Hourly Breakdown (Day-Level)", "Peak Items List", "Contributions", "Star Items"],
+                default=["Metrics", "Graphs", "Hourly Breakdown (Aggregated)", "Hourly Breakdown (Day-Level)", "Peak Items List", "Contributions", "Star Items"]
             )
 
         def render_metrics():
@@ -400,22 +335,29 @@ if uploaded_file:
                 if 'Hour' in df.columns:
                     hourly = df.groupby('Hour')['TotalAmount'].sum().reset_index()
                     fig_hourly = px.bar(hourly, x='Hour', y='TotalAmount')
-                    
-                    # FIX 1: RESTORE AVERAGE LINE
                     avg_hourly = hourly['TotalAmount'].mean()
                     fig_hourly.add_hline(y=avg_hourly, line_dash="dash", line_color="red", 
                                          annotation_text=f"Avg: ₹{avg_hourly:,.0f}", annotation_position="top right")
-                    
                     st.plotly_chart(fig_hourly, use_container_width=True)
             with g2:
                 st.subheader("📅 Peak Days Graph")
+                # REQ 1: Fixed Order Mon-Sun and BOLD axis
                 daily_peak = df.groupby('DayOfWeek')['TotalAmount'].sum().reindex(
                     ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']).reset_index()
-                st.bar_chart(daily_peak.set_index('DayOfWeek'))
+                
+                fig_daily = px.bar(daily_peak, x='DayOfWeek', y='TotalAmount')
+                
+                # Apply Bold Font to X-Axis Labels
+                fig_daily.update_xaxes(
+                    tickfont=dict(family='Arial Black', size=14, color='black'),
+                    title_font=dict(family='Arial Black', size=16)
+                )
+                st.plotly_chart(fig_daily, use_container_width=True)
             st.divider()
 
-        def render_hourly_details():
-            st.subheader("🕰️ Hourly Sales Breakdown (9:00 AM - 11:00 PM)")
+        def render_hourly_aggregated():
+            st.subheader("🕰️ Hourly Sales Breakdown (9am - 11pm) - Aggregated")
+            st.caption("Aggregated view of all days combined.")
             hourly_df = get_hourly_details(df)
             if not hourly_df.empty:
                 time_slots = hourly_df['Time Slot'].unique()
@@ -424,9 +366,45 @@ if uploaded_file:
                     total_rev = slot_data['TotalAmount'].sum()
                     total_qty = slot_data['Quantity'].sum()
                     top_item = slot_data.sort_values('Quantity', ascending=False).iloc[0]['ItemName']
-                    
                     with st.expander(f"⏰ {slot}  |  Revenue: ₹{total_rev:,.0f}  |  Units: {total_qty}  |  Top: {top_item}"):
                         st.dataframe(slot_data[['ItemName', 'Quantity', 'TotalAmount']], hide_index=True, use_container_width=True)
+            else: st.info("No data.")
+            st.divider()
+
+        def render_hourly_day_breakdown():
+            # REQ 2: New Section with Day Filter
+            st.subheader("📅 Daily Hourly Breakdown (Filter by Day)")
+            st.markdown("See exactly what sells during each hour of a **specific day** (e.g., Saturday vs Monday).")
+            
+            day_selected = st.selectbox("Select Day of Week", ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'])
+            
+            # Filter Data by Day
+            day_df = df[df['DayOfWeek'] == day_selected]
+            
+            if not day_df.empty:
+                hourly_day_df = get_hourly_details(day_df)
+                if not hourly_day_df.empty:
+                    time_slots = hourly_day_df['Time Slot'].unique()
+                    for slot in time_slots:
+                        slot_data = hourly_day_df[hourly_day_df['Time Slot'] == slot]
+                        total_rev = slot_data['TotalAmount'].sum()
+                        total_qty = slot_data['Quantity'].sum()
+                        top_item = slot_data.sort_values('Quantity', ascending=False).iloc[0]['ItemName']
+                        
+                        with st.expander(f"⏰ {slot} ({day_selected})  |  Rev: ₹{total_rev:,.0f}  |  Units: {total_qty}  |  Top: {top_item}"):
+                            st.dataframe(
+                                slot_data[['ItemName', 'Quantity', 'TotalAmount']],
+                                column_config={
+                                    "ItemName": "Item Name",
+                                    "Quantity": st.column_config.ProgressColumn("Units Sold", format="%d", min_value=0, max_value=int(hourly_day_df['Quantity'].max())),
+                                    "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")
+                                },
+                                hide_index=True, use_container_width=True
+                            )
+                else:
+                    st.info(f"No hourly data found for {day_selected} (9am-11pm).")
+            else:
+                st.warning(f"No transactions found for {day_selected} in the uploaded file.")
             st.divider()
 
         def render_peak_list():
@@ -458,7 +436,15 @@ if uploaded_file:
             st.dataframe(star_df[['Item Name', 'TotalAmount', 'Contribution %', 'Peak Selling Hour', 'Qty Sold (Peak)']], 
                          column_config={"TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"), "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%")}, hide_index=True, use_container_width=True)
 
-        block_map = {"Metrics": render_metrics, "Graphs": render_graphs, "Hourly Breakdown (9am-11pm)": render_hourly_details, "Peak Items List": render_peak_list, "Contributions": render_contributions, "Star Items": render_star_items}
+        block_map = {
+            "Metrics": render_metrics, 
+            "Graphs": render_graphs, 
+            "Hourly Breakdown (Aggregated)": render_hourly_aggregated,
+            "Hourly Breakdown (Day-Level)": render_hourly_day_breakdown,
+            "Peak Items List": render_peak_list, 
+            "Contributions": render_contributions, 
+            "Star Items": render_star_items
+        }
         for block_name in overview_order:
             if block_name in block_map: block_map[block_name]()
 
@@ -554,7 +540,6 @@ if uploaded_file:
 
             st.dataframe(assoc_rules[['Status', 'Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang']], column_config={"Status": st.column_config.TextColumn("Strategic Status"), "Support (%)": st.column_config.NumberColumn("Support %", format="%.2f"), "No. of Orders": st.column_config.NumberColumn("Orders", format="%d"), "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"), "lift": st.column_config.NumberColumn("Lift", format="%.2f")}, hide_index=True, use_container_width=True, height=600)
             
-            # FIX 2: RESTORE SCATTER PLOT
             fig = px.scatter(
                 assoc_rules, x="Support (%)", y="confidence", 
                 size="lift", color="zhang",
@@ -572,10 +557,8 @@ if uploaded_file:
         st.markdown("**Model:** Hybrid Ensemble (Prophet + XGBoost + Random Forest + Meta-Learner).")
         st.markdown("---")
         
-        # 1. SPECIFIC UPLOADER FOR FORECAST
         forecast_file = st.file_uploader("Upload Historical Master File (Recommended: 3+ Months Data)", type=['xlsx'], key='forecast_uploader')
         
-        # Determine which dataframe to use
         df_to_use = None
         if forecast_file:
             df_to_use = load_data(forecast_file)
@@ -585,13 +568,11 @@ if uploaded_file:
             st.warning("⚠️ Using Sidebar File (Short-term data). Accuracy may be low without history.")
         
         if df_to_use is not None:
-            # 2. Select Item
             all_items = df_to_use['ItemName'].unique()
             selected_item = st.selectbox("Select Item to Forecast", all_items)
             
             if st.button("Generate AI Forecast"):
                 with st.spinner(f"Training AI Models for {selected_item}..."):
-                    # Filter Data
                     item_df = df_to_use[df_to_use['ItemName'] == selected_item].groupby('Date')['Quantity'].sum().reset_index()
                     item_df.columns = ['ds', 'y'] # Prophet format
                     
