@@ -486,19 +486,22 @@ if uploaded_file:
         
         st.divider()
         
-        # 2. UPDATED TABLE: Items Not Worth Producing (WITH NEW CATEGORY FILTER)
+        # 2. UPDATED TABLE: Items Not Worth Producing (WITH DROPDOWN FILTER)
         st.subheader("⚠️ Items Not Worth Producing")
         st.markdown("Items with **< 3 units sold** in a 3-Day window (Day Before + Day + Day After) combined across all dates.")
         
-        # --- NEW ADDITION: CATEGORY FILTER ---
+        # --- NEW ADDITION: CATEGORY DROPDOWN FILTER (MODIFIED) ---
         available_categories = sorted(df['Category'].unique().tolist())
-        selected_nw_categories = st.multiselect(
+        # Added "All Categories" to the start of the list
+        dropdown_options = ["All Categories"] + available_categories
+        
+        selected_nw_category = st.selectbox(
             "Filter by Category",
-            options=available_categories,
-            default=available_categories,
-            key="nw_category_filter"
+            options=dropdown_options,
+            index=0, # Default to "All Categories"
+            key="nw_category_dropdown"
         )
-        # -------------------------------------
+        # --------------------------------------------------------
 
         not_worth_dict = {}
         max_len = 0
@@ -514,8 +517,8 @@ if uploaded_file:
             window_df = df[df['DayOfWeek'].isin(window_days)]
             
             # --- APPLY CATEGORY FILTER TO DATA BEFORE CALCULATION ---
-            if selected_nw_categories:
-                window_df = window_df[window_df['Category'].isin(selected_nw_categories)]
+            if selected_nw_category != "All Categories":
+                window_df = window_df[window_df['Category'] == selected_nw_category]
             # --------------------------------------------------------
             
             # Group Quantity
