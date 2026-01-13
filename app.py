@@ -605,39 +605,66 @@ if uploaded_file:
         st.plotly_chart(fig_upsell, use_container_width=True)
         st.caption("Red bars indicate days where a high percentage of customers bought less than the average amount. These days require sales training.")
 
-    # --- TAB: CATEGORY DETAILS ---
+    # --- TAB: CATEGORY DETAILS (UPDATED) ---
     with tab_cat:
         st.header("📂 Category Deep-Dive")
-        cats = df['Category'].unique()
+        cats = sorted(df['Category'].unique()) # Sorted for better UX
         total_business_rev = df['TotalAmount'].sum()
         days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
         
-        for cat in cats:
-            st.subheader(f"🔹 {cat}")
-            cat_data = df[df['Category'] == cat]
-            cat_stats = cat_data.groupby('ItemName').agg({'TotalAmount': 'sum', 'Quantity': 'sum'}).reset_index()
-            cat_stats['Contribution %'] = (cat_stats['TotalAmount'] / total_business_rev) * 100
+        # --- NEW CHANGE: DROPDOWN SELECTION INSTEAD OF LOOP ---
+        selected_cat_deep_dive = st.selectbox("Select Category to Analyze", cats, key='cat_deep_dive_select')
+        
+        # Filter for the selected category
+        cat_data = df[df['Category'] == selected_cat_deep_dive]
+        
+        st.subheader(f"🔹 {selected_cat_deep_dive}")
+        
+        cat_stats = cat_data.groupby('ItemName').agg({'TotalAmount': 'sum', 'Quantity': 'sum'}).reset_index()
+        cat_stats['Contribution %'] = (cat_stats['TotalAmount'] / total_business_rev) * 100
+        
+        day_pivot = cat_data.groupby(['ItemName', 'DayOfWeek'])['Quantity'].sum().unstack(fill_value=0)
+        for day in days_order:
+            if day not in day_pivot.columns: day_pivot[day] = 0
+        day_pivot = day_pivot[days_order] 
+        
+        cat_stats = pd.merge(cat_stats, day_pivot, on='ItemName', how='left').fillna(0)
+        cat_stats = cat_stats.sort_values('TotalAmount', ascending=False)
+        
+        # --- NEW CHANGE: REVENUE MARKERS (**, *) ---
+        def mark_item_name(row):
+            name = row['ItemName']
+            rev = row['TotalAmount']
             
-            day_pivot = cat_data.groupby(['ItemName', 'DayOfWeek'])['Quantity'].sum().unstack(fill_value=0)
-            for day in days_order:
-                if day not in day_pivot.columns: day_pivot[day] = 0
-            day_pivot = day_pivot[days_order] 
+            # 1. Apply Pareto Star (Existing)
+            if name in pareto_list:
+                name = f"★ {name}"
             
-            cat_stats = pd.merge(cat_stats, day_pivot, on='ItemName', how='left').fillna(0)
-            cat_stats = cat_stats.sort_values('TotalAmount', ascending=False)
-            cat_stats['Item Name'] = cat_stats['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
+            # 2. Apply Revenue Markers (New Requirement)
+            if rev < 500:
+                name = f"{name} **" # Represents Red ** (Low Revenue)
+            elif 500 <= rev < 1500:
+                name = f"{name} *"  # Represents Red * (Medium-Low Revenue)
             
-            col_config = {
-                "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"),
-                "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%"),
-                "Quantity": st.column_config.NumberColumn("Total Qty")
-            }
-            for day in days_order:
-                col_config[day] = st.column_config.NumberColumn(day, format="%d")
-            
-            cols_to_show = ['Item Name', 'TotalAmount', 'Quantity', 'Contribution %'] + days_order
-            st.dataframe(cat_stats[cols_to_show], column_config=col_config, hide_index=True, use_container_width=True)
-            st.divider()
+            return name
+
+        cat_stats['Item Name'] = cat_stats.apply(mark_item_name, axis=1)
+        # ------------------------------------------
+        
+        col_config = {
+            "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"),
+            "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%"),
+            "Quantity": st.column_config.NumberColumn("Total Qty")
+        }
+        for day in days_order:
+            col_config[day] = st.column_config.NumberColumn(day, format="%d")
+        
+        cols_to_show = ['Item Name', 'TotalAmount', 'Quantity', 'Contribution %'] + days_order
+        st.dataframe(cat_stats[cols_to_show], column_config=col_config, hide_index=True, use_container_width=True)
+        
+        # Legend for the user
+        st.caption("📝 **Legend:** `**` = Revenue < ₹500 (Critical) | `*` = Revenue < ₹1500 (Warning) | `★` = Pareto Top 80% Item")
+        st.divider()
 
     # --- TAB 2: PARETO ---
     with tab2:
