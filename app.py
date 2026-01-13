@@ -185,7 +185,7 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     return rules[['Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang', 'conviction']]
 
 def get_combo_analysis_full(df):
-    basket = (df.groupby(['OrderID', 'ItemName'])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID')
+    basket = (df.groupby(['OrderID', 'ItemName'])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID'))
     basket_sets = basket.applymap(lambda x: 1 if x > 0 else 0)
     frequent = apriori(basket_sets, min_support=0.005, use_colnames=True)
     if frequent.empty: return pd.DataFrame()
