@@ -159,9 +159,8 @@ class HybridDemandForecaster:
 def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     basket = df.groupby(['OrderID', level])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID')
     
-    # --- ERROR FIX: Use vectorized boolean conversion instead of lambda apply ---
+    # Vectorized boolean conversion
     basket_sets = (basket > 0)
-    # --------------------------------------------------------------------------
     
     frequent_itemsets = fpgrowth(basket_sets, min_support=min_sup, use_colnames=True)
     if frequent_itemsets.empty: return pd.DataFrame()
@@ -186,6 +185,12 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
     
+    # --- ERROR FIX: REMOVE SELF-ASSOCIATION FOR CATEGORIES ---
+    # Scientific logic: We want cross-category insights (e.g., Sweets -> Savory), not Sweets -> Sweets.
+    if level == 'Category':
+        rules = rules[rules['Antecedent'] != rules['Consequent']]
+    # ---------------------------------------------------------
+    
     rules = rules.sort_values('lift', ascending=False)
     rules = rules.drop_duplicates(subset=['Antecedent', 'Consequent'])
     return rules[['Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang', 'conviction']]
@@ -193,9 +198,8 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
 def get_combo_analysis_full(df):
     basket = (df.groupby(['OrderID', 'ItemName'])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID'))
     
-    # --- ERROR FIX: Use vectorized integer conversion instead of lambda apply ---
+    # Vectorized integer conversion
     basket_sets = (basket > 0).astype(int)
-    # --------------------------------------------------------------------------
     
     frequent = apriori(basket_sets, min_support=0.005, use_colnames=True)
     if frequent.empty: return pd.DataFrame()
