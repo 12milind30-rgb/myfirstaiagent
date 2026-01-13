@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 10.1", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 10.2", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -75,7 +75,6 @@ def get_peak_hour_for_pair(df, item_a, item_b):
 
 def get_hourly_details(df):
     if 'Hour' not in df.columns: return pd.DataFrame()
-    # Note: Kept filter here for Aggregated View per instruction to keep existing view
     mask = (df['Hour'] >= 9) & (df['Hour'] <= 23)
     filtered = df[mask].copy()
     hourly_stats = filtered.groupby(['Hour', 'ItemName']).agg({
@@ -186,7 +185,7 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     return rules[['Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang', 'conviction']]
 
 def get_combo_analysis_full(df):
-    basket = (df.groupby(['OrderID', 'ItemName'])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID'))
+    basket = (df.groupby(['OrderID', 'ItemName'])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID')
     basket_sets = basket.applymap(lambda x: 1 if x > 0 else 0)
     frequent = apriori(basket_sets, min_support=0.005, use_colnames=True)
     if frequent.empty: return pd.DataFrame()
@@ -302,7 +301,7 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         st.plotly_chart(fig, use_container_width=True)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 10.1")
+st.title("📊 Mithas Restaurant Intelligence 10.2")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
 
 if uploaded_file:
@@ -310,8 +309,9 @@ if uploaded_file:
     pareto_list = get_pareto_items(df)
     pareto_count = len(pareto_list)
     
-    tab1, tab_cat, tab2, tab3, tab4, tab_assoc, tab5, tab6 = st.tabs([
-        "Overview", "Category Details", "Pareto (Visual)", "Time Series", "Smart Combos", "Association Analysis", "Demand Forecast", "AI Chat"
+    # REQ 1: Added "Day wise Analysis" tab after Overview
+    tab1, tab_day_wise, tab_cat, tab2, tab3, tab4, tab_assoc, tab5, tab6 = st.tabs([
+        "Overview", "Day wise Analysis", "Category Details", "Pareto (Visual)", "Time Series", "Smart Combos", "Association Analysis", "Demand Forecast", "AI Chat"
     ])
 
     # --- TAB 1: OVERVIEW ---
@@ -320,8 +320,8 @@ if uploaded_file:
         with st.expander("🛠️ Reorder Page Layout", expanded=False):
             overview_order = st.multiselect(
                 "Select order of sections:",
-                ["Metrics", "Graphs", "Hourly Breakdown (Aggregated)", "Hourly Breakdown (Day-Level)", "Peak Items List", "Contributions", "Star Items"],
-                default=["Metrics", "Graphs", "Hourly Breakdown (Aggregated)", "Hourly Breakdown (Day-Level)", "Peak Items List", "Contributions", "Star Items"]
+                ["Metrics", "Graphs", "Hourly Breakdown (Aggregated)", "Peak Items List", "Contributions", "Star Items"],
+                default=["Metrics", "Graphs", "Hourly Breakdown (Aggregated)", "Peak Items List", "Contributions", "Star Items"]
             )
 
         def render_metrics():
@@ -341,20 +341,15 @@ if uploaded_file:
                 if 'Hour' in df.columns:
                     hourly = df.groupby('Hour')['TotalAmount'].sum().reset_index()
                     fig_hourly = px.bar(hourly, x='Hour', y='TotalAmount')
-                    
                     avg_hourly = hourly['TotalAmount'].mean()
                     fig_hourly.add_hline(y=avg_hourly, line_dash="dash", line_color="red", 
                                          annotation_text=f"Avg: ₹{avg_hourly:,.0f}", annotation_position="top right")
-                    
-                    # FIX 1: Show ALL hours
                     fig_hourly.update_xaxes(tickmode='linear', dtick=1)
-                    
                     st.plotly_chart(fig_hourly, use_container_width=True)
             with g2:
                 st.subheader("📅 Peak Days Graph")
                 daily_peak = df.groupby('DayOfWeek')['TotalAmount'].sum().reindex(
                     ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']).reset_index()
-                
                 fig_daily = px.bar(daily_peak, x='DayOfWeek', y='TotalAmount')
                 fig_daily.update_xaxes(
                     tickfont=dict(family='Arial Black', size=14, color='black'),
@@ -367,11 +362,8 @@ if uploaded_file:
             st.subheader("🕰️ Hourly Sales Breakdown (9am - 11pm) - Aggregated")
             st.caption("Aggregated view of all days combined.")
             hourly_df = get_hourly_details(df)
-            
-            # FIX 3: Apply Pareto Highlight
             if not hourly_df.empty:
                 hourly_df['ItemName'] = hourly_df['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
-                
                 time_slots = hourly_df['Time Slot'].unique()
                 for slot in time_slots:
                     slot_data = hourly_df[hourly_df['Time Slot'] == slot]
@@ -381,89 +373,6 @@ if uploaded_file:
                     with st.expander(f"⏰ {slot}  |  Revenue: ₹{total_rev:,.0f}  |  Units: {total_qty}  |  Top: {top_item}"):
                         st.dataframe(slot_data[['ItemName', 'Quantity', 'TotalAmount']], hide_index=True, use_container_width=True)
             else: st.info("No data.")
-            st.divider()
-
-        def render_hourly_day_breakdown():
-            st.subheader("📅 Daily Hourly Breakdown (Matrix View)")
-            st.markdown("Drill down: **Day** → **Date** → **Category** → **Hourly Matrix**.")
-            
-            days_list = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
-            day_selected = st.selectbox("1. Select Day of Week", days_list)
-            
-            day_df = df[df['DayOfWeek'] == day_selected]
-            
-            if not day_df.empty:
-                unique_dates = sorted(day_df['Date'].dt.strftime('%Y-%m-%d').unique())
-                date_options = [f"All {day_selected}s Combined"] + unique_dates
-                date_selected = st.selectbox(f"2. Select Date ({day_selected})", date_options)
-                
-                if date_selected == f"All {day_selected}s Combined":
-                    target_df = day_df
-                else:
-                    target_df = day_df[day_df['Date'].dt.strftime('%Y-%m-%d') == date_selected]
-                
-                unique_cats = sorted(df['Category'].unique())
-                cat_options = ["All Categories"] + unique_cats
-                category_selected = st.selectbox("3. Filter by Category", cat_options)
-                
-                if category_selected != "All Categories":
-                    target_df = target_df[target_df['Category'] == category_selected]
-                    st.caption(f"Showing **{category_selected}** items for **{date_selected}**.")
-                else:
-                    st.caption(f"Showing **All Items** for **{date_selected}**.")
-
-                # --- 3-DAY QUANTITY LOGIC ---
-                df_3day = pd.DataFrame()
-                if date_selected == f"All {day_selected}s Combined":
-                    curr_idx = days_list.index(day_selected)
-                    prev_day = days_list[(curr_idx - 1) % 7]
-                    next_day = days_list[(curr_idx + 1) % 7]
-                    target_days = [prev_day, day_selected, next_day]
-                    df_3day = df[df['DayOfWeek'].isin(target_days)]
-                else:
-                    sel_dt = pd.to_datetime(date_selected)
-                    target_dates = [sel_dt - timedelta(days=1), sel_dt, sel_dt + timedelta(days=1)]
-                    df_3day = df[df['Date'].isin(target_dates)]
-
-                if category_selected != "All Categories":
-                    df_3day = df_3day[df_3day['Category'] == category_selected]
-
-                qty_3day = df_3day.groupby('ItemName')['Quantity'].sum().rename("3-Day Qty")
-
-                # --- MATRIX BUILD ---
-                if not target_df.empty:
-                    # FIX 2: REMOVED THE 9AM-11PM FILTER HERE to fix 83 vs 85 mismatch
-                    # Now it includes sales from all hours for the selected day/category
-                    
-                    if not target_df.empty:
-                        pivot = target_df.groupby(['ItemName', 'Hour'])['Quantity'].sum().unstack(fill_value=0)
-                        
-                        # Ensure nice column sorting (even if some hours missing)
-                        pivot = pivot[sorted(pivot.columns)]
-                        
-                        # Rename columns
-                        pivot.columns = [f"{int(h)}-{int(h)+1}" for h in pivot.columns]
-                        
-                        # Add Total Column
-                        pivot['Total Quantity'] = pivot.sum(axis=1)
-                        
-                        # Join 3-Day Quantity
-                        pivot = pivot.join(qty_3day, how='left').fillna(0)
-                        pivot['3-Day Qty'] = pivot['3-Day Qty'].astype(int)
-                        
-                        # Sort Rows
-                        pivot = pivot.sort_values('Total Quantity', ascending=False)
-                        
-                        # FIX 3: Apply Pareto Highlight to Index (ItemName)
-                        pivot.index = pivot.index.map(lambda x: f"★ {x}" if x in pareto_list else x)
-                        
-                        st.dataframe(pivot, use_container_width=True, height=600)
-                    else:
-                        st.warning("No sales found for this selection.")
-                else:
-                    st.warning(f"No data found for Category: {category_selected} on this date.")
-            else:
-                st.warning(f"No transactions found for {day_selected} in the uploaded file.")
             st.divider()
 
         def render_peak_list():
@@ -499,7 +408,6 @@ if uploaded_file:
             "Metrics": render_metrics, 
             "Graphs": render_graphs, 
             "Hourly Breakdown (Aggregated)": render_hourly_aggregated,
-            "Hourly Breakdown (Day-Level)": render_hourly_day_breakdown,
             "Peak Items List": render_peak_list, 
             "Contributions": render_contributions, 
             "Star Items": render_star_items
@@ -507,7 +415,113 @@ if uploaded_file:
         for block_name in overview_order:
             if block_name in block_map: block_map[block_name]()
 
-    # --- TAB: CATEGORY DETAILS (UPDATED: DAY-WISE COLUMNS) ---
+    # --- TAB: DAY WISE ANALYSIS (NEW) ---
+    with tab_day_wise:
+        st.header("📅 Day-wise Deep Dive")
+        
+        # 1. MOVED MATRIX VIEW HERE
+        st.subheader("Hourly Breakdown (Matrix View)")
+        st.markdown("Drill down: **Day** → **Date** → **Category** → **Hourly Matrix**.")
+        
+        days_list = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
+        day_selected = st.selectbox("1. Select Day of Week", days_list)
+        
+        day_df = df[df['DayOfWeek'] == day_selected]
+        
+        if not day_df.empty:
+            unique_dates = sorted(day_df['Date'].dt.strftime('%Y-%m-%d').unique())
+            date_options = [f"All {day_selected}s Combined"] + unique_dates
+            date_selected = st.selectbox(f"2. Select Date ({day_selected})", date_options)
+            
+            if date_selected == f"All {day_selected}s Combined":
+                target_df = day_df
+            else:
+                target_df = day_df[day_df['Date'].dt.strftime('%Y-%m-%d') == date_selected]
+            
+            unique_cats = sorted(df['Category'].unique())
+            cat_options = ["All Categories"] + unique_cats
+            category_selected = st.selectbox("3. Filter by Category", cat_options)
+            
+            if category_selected != "All Categories":
+                target_df = target_df[target_df['Category'] == category_selected]
+                st.caption(f"Showing **{category_selected}** items for **{date_selected}**.")
+            else:
+                st.caption(f"Showing **All Items** for **{date_selected}**.")
+
+            # 3-Day Quantity Logic for Matrix
+            df_3day = pd.DataFrame()
+            if date_selected == f"All {day_selected}s Combined":
+                curr_idx = days_list.index(day_selected)
+                prev_day = days_list[(curr_idx - 1) % 7]
+                next_day = days_list[(curr_idx + 1) % 7]
+                target_days = [prev_day, day_selected, next_day]
+                df_3day = df[df['DayOfWeek'].isin(target_days)]
+            else:
+                sel_dt = pd.to_datetime(date_selected)
+                target_dates = [sel_dt - timedelta(days=1), sel_dt, sel_dt + timedelta(days=1)]
+                df_3day = df[df['Date'].isin(target_dates)]
+
+            if category_selected != "All Categories":
+                df_3day = df_3day[df_3day['Category'] == category_selected]
+
+            qty_3day = df_3day.groupby('ItemName')['Quantity'].sum().rename("3-Day Qty")
+
+            # Matrix Construction
+            if not target_df.empty:
+                if not target_df.empty:
+                    pivot = target_df.groupby(['ItemName', 'Hour'])['Quantity'].sum().unstack(fill_value=0)
+                    for h in range(9, 24):
+                        if h not in pivot.columns: pivot[h] = 0
+                    pivot = pivot[sorted(pivot.columns)]
+                    pivot.columns = [f"{int(h)}-{int(h)+1}" for h in pivot.columns]
+                    pivot['Total Quantity'] = pivot.sum(axis=1)
+                    pivot = pivot.join(qty_3day, how='left').fillna(0)
+                    pivot['3-Day Qty'] = pivot['3-Day Qty'].astype(int)
+                    pivot = pivot.sort_values('Total Quantity', ascending=False)
+                    pivot.index = pivot.index.map(lambda x: f"★ {x}" if x in pareto_list else x)
+                    st.dataframe(pivot, use_container_width=True, height=600)
+                else: st.warning("No sales found for this selection.")
+            else: st.warning(f"No data found for Category: {category_selected} on this date.")
+        else: st.warning(f"No transactions found for {day_selected} in the uploaded file.")
+        
+        st.divider()
+        
+        # 2. NEW TABLE: Items Not Worth Producing (< 3 units on 3-day rolling window)
+        st.subheader("⚠️ Items Not Worth Producing")
+        st.markdown("Items with **< 3 units sold** in a 3-Day window (Day Before + Day + Day After) combined across all dates.")
+        
+        not_worth_dict = {}
+        max_len = 0
+        
+        for d in days_list:
+            # Determine 3-day window for "All combined"
+            curr_idx = days_list.index(d)
+            prev_d = days_list[(curr_idx - 1) % 7]
+            next_d = days_list[(curr_idx + 1) % 7]
+            window_days = [prev_d, d, next_d]
+            
+            # Filter Data
+            window_df = df[df['DayOfWeek'].isin(window_days)]
+            
+            # Group Quantity
+            item_sums = window_df.groupby('ItemName')['Quantity'].sum()
+            
+            # Filter < 3
+            low_items = item_sums[item_sums < 3].index.tolist()
+            not_worth_dict[d] = low_items
+            if len(low_items) > max_len:
+                max_len = len(low_items)
+        
+        # Normalize list lengths for DataFrame
+        for d in days_list:
+            current_len = len(not_worth_dict[d])
+            if current_len < max_len:
+                not_worth_dict[d].extend([""] * (max_len - current_len))
+        
+        waste_df = pd.DataFrame(not_worth_dict)
+        st.dataframe(waste_df, use_container_width=True, height=500)
+
+    # --- TAB: CATEGORY DETAILS ---
     with tab_cat:
         st.header("📂 Category Deep-Dive")
         cats = df['Category'].unique()
@@ -517,23 +531,16 @@ if uploaded_file:
         for cat in cats:
             st.subheader(f"🔹 {cat}")
             cat_data = df[df['Category'] == cat]
-            
-            # Base Stats
             cat_stats = cat_data.groupby('ItemName').agg({'TotalAmount': 'sum', 'Quantity': 'sum'}).reset_index()
             cat_stats['Contribution %'] = (cat_stats['TotalAmount'] / total_business_rev) * 100
             
-            # Day-wise Pivot
             day_pivot = cat_data.groupby(['ItemName', 'DayOfWeek'])['Quantity'].sum().unstack(fill_value=0)
             for day in days_order:
-                if day not in day_pivot.columns:
-                    day_pivot[day] = 0
+                if day not in day_pivot.columns: day_pivot[day] = 0
             day_pivot = day_pivot[days_order] 
             
-            # Merge
             cat_stats = pd.merge(cat_stats, day_pivot, on='ItemName', how='left').fillna(0)
             cat_stats = cat_stats.sort_values('TotalAmount', ascending=False)
-            
-            # Formatting
             cat_stats['Item Name'] = cat_stats['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
             
             col_config = {
@@ -545,13 +552,7 @@ if uploaded_file:
                 col_config[day] = st.column_config.NumberColumn(day, format="%d")
             
             cols_to_show = ['Item Name', 'TotalAmount', 'Quantity', 'Contribution %'] + days_order
-            
-            st.dataframe(
-                cat_stats[cols_to_show],
-                column_config=col_config,
-                hide_index=True,
-                use_container_width=True
-            )
+            st.dataframe(cat_stats[cols_to_show], column_config=col_config, hide_index=True, use_container_width=True)
             st.divider()
 
     # --- TAB 2: PARETO ---
