@@ -158,13 +158,20 @@ class HybridDemandForecaster:
 
 def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     basket = df.groupby(['OrderID', level])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID')
-    basket_sets = basket.applymap(lambda x: True if x > 0 else False)
+    # Use map(bool) logic which is cleaner
+    basket_sets = basket.apply(lambda x: x > 0)
+    
     frequent_itemsets = fpgrowth(basket_sets, min_support=min_sup, use_colnames=True)
     if frequent_itemsets.empty: return pd.DataFrame()
     rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_conf)
     
-    total_orders = df['OrderID'].nunique()
-    rules['No. of Orders'] = (rules['support'] * total_orders).astype(int)
+    # --- FIX 1: USE BASKET LENGTH INSTEAD OF DF.UNIQUE ---
+    # This prevents inflation errors if 'df' contains orders that were filtered out during basket creation.
+    total_orders_in_model = len(basket)
+    
+    rules['No. of Orders'] = (rules['support'] * total_orders_in_model).round().astype(int)
+    # -----------------------------------------------------
+    
     rules['Support (%)'] = rules['support'] * 100
     
     def zhangs_metric(rule):
@@ -186,7 +193,7 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
 
 def get_combo_analysis_full(df):
     basket = (df.groupby(['OrderID', 'ItemName'])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID'))
-    basket_sets = basket.applymap(lambda x: 1 if x > 0 else 0)
+    basket_sets = basket.apply(lambda x: 1 if x > 0 else 0)
     frequent = apriori(basket_sets, min_support=0.005, use_colnames=True)
     if frequent.empty: return pd.DataFrame()
     rules = association_rules(frequent, metric="lift", min_threshold=1.05)
@@ -201,6 +208,17 @@ def get_combo_analysis_full(df):
     total_orders = df['OrderID'].nunique()
     rules['Times Sold Together'] = (rules['support'] * total_orders).astype(int)
     rules['Peak Hour'] = rules.apply(lambda x: get_peak_hour_for_pair(df, x['Item A'], x['Item B']), axis=1)
+    
+    # --- FIX 2: ADD COMBO VALUE COLUMN ---
+    # Calculate average price for each item (Total Sales / Total Qty) to handle variable pricing
+    item_avg_price = df.groupby('ItemName').apply(
+        lambda x: x['TotalAmount'].sum() / x['Quantity'].sum() if x['Quantity'].sum() > 0 else 0
+    ).to_dict()
+    
+    # Map prices to combo
+    rules['Combo Value'] = rules['Item A'].map(item_avg_price).fillna(0) + rules['Item B'].map(item_avg_price).fillna(0)
+    # -------------------------------------
+    
     return rules
 
 def get_part3_strategy(rules_df):
@@ -695,8 +713,8 @@ if uploaded_file:
         def render_part1():
             st.subheader("1️⃣ Part 1: Full Category + Item Combo Map")
             if not rules_df.empty:
-                display_cols = ['Category A', 'Category B', 'Specific Item Combo', 'Times Sold Together', 'Peak Hour', 'lift']
-                st.dataframe(rules_df[display_cols].sort_values('Times Sold Together', ascending=False), column_config={"Specific Item Combo": st.column_config.TextColumn("Item A + Item B", width="medium"), "lift": st.column_config.NumberColumn("Lift Strength", format="%.2f")}, hide_index=True, use_container_width=True)
+                display_cols = ['Category A', 'Category B', 'Specific Item Combo', 'Times Sold Together', 'Combo Value', 'Peak Hour', 'lift']
+                st.dataframe(rules_df[display_cols].sort_values('Times Sold Together', ascending=False), column_config={"Specific Item Combo": st.column_config.TextColumn("Item A + Item B", width="medium"), "lift": st.column_config.NumberColumn("Lift Strength", format="%.2f"), "Combo Value": st.column_config.NumberColumn("Combo Value", format="₹%.2f")}, hide_index=True, use_container_width=True)
             else: st.warning("No significant combos found.")
         def render_part3():
             st.subheader("3️⃣ Part 3: Strategic Recommendations")
