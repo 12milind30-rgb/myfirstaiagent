@@ -486,49 +486,63 @@ if uploaded_file:
         
         st.divider()
         
-        # 2. UPDATED TABLE: Items Not Worth Producing (WITH DROPDOWN FILTER)
+        # 2. UPDATED TABLE: Items Not Worth Producing (WITH DROPDOWN FILTER & REFINED LOGIC)
         st.subheader("⚠️ Items Not Worth Producing")
-        st.markdown("Items with **< 3 units sold** in a 3-Day window (Day Before + Day + Day After) combined across all dates.")
+        st.markdown("Items with **< 3 units sold** in a 3-Day window. **Refined:** Only items with >0 sales on the specific day are shown.")
         
-        # --- NEW ADDITION: CATEGORY DROPDOWN FILTER (MODIFIED) ---
+        # --- CATEGORY DROPDOWN FILTER ---
         available_categories = sorted(df['Category'].unique().tolist())
-        # Added "All Categories" to the start of the list
         dropdown_options = ["All Categories"] + available_categories
         
         selected_nw_category = st.selectbox(
             "Filter by Category",
             options=dropdown_options,
-            index=0, # Default to "All Categories"
+            index=0, 
             key="nw_category_dropdown"
         )
-        # --------------------------------------------------------
+        # --------------------------------
 
         not_worth_dict = {}
         max_len = 0
         
         for d in days_list:
-            # Determine 3-day window for "All combined"
+            # Determine 3-day window
             curr_idx = days_list.index(d)
             prev_d = days_list[(curr_idx - 1) % 7]
             next_d = days_list[(curr_idx + 1) % 7]
             window_days = [prev_d, d, next_d]
             
-            # Filter Data
+            # Get Window Data (For the <3 Count Check)
             window_df = df[df['DayOfWeek'].isin(window_days)]
             
-            # --- APPLY CATEGORY FILTER TO DATA BEFORE CALCULATION ---
+            # Apply Category Filter
             if selected_nw_category != "All Categories":
                 window_df = window_df[window_df['Category'] == selected_nw_category]
-            # --------------------------------------------------------
             
-            # Group Quantity
+            # Calculate rolling sums
             item_sums = window_df.groupby('ItemName')['Quantity'].sum()
             
-            # Filter < 3
-            low_items = item_sums[item_sums < 3].index.tolist()
-            not_worth_dict[d] = low_items
-            if len(low_items) > max_len:
-                max_len = len(low_items)
+            # Identify "Candidates" (Sales < 3 in the window)
+            candidate_items = item_sums[item_sums < 3].index.tolist()
+            
+            # --- CRITICAL FIX: FILTER FOR ITEMS SOLD *ON THIS SPECIFIC DAY* ---
+            # We only show the item on Day D if it had > 0 sales on Day D.
+            # This prevents items sold on Sunday appearing on Saturday's list.
+            
+            day_specific_df = df[df['DayOfWeek'] == d]
+            if selected_nw_category != "All Categories":
+                day_specific_df = day_specific_df[day_specific_df['Category'] == selected_nw_category]
+            
+            # Get items that actually sold today
+            active_items_today = day_specific_df[day_specific_df['Quantity'] > 0]['ItemName'].unique().tolist()
+            
+            # Intersection: Candidate (<3 total) AND Active (>0 today)
+            final_items = [item for item in candidate_items if item in active_items_today]
+            # ---------------------------------------------------------------
+
+            not_worth_dict[d] = final_items
+            if len(final_items) > max_len:
+                max_len = len(final_items)
         
         # Normalize list lengths for DataFrame
         for d in days_list:
