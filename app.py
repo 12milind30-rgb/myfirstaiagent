@@ -158,10 +158,7 @@ class HybridDemandForecaster:
 
 def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     # 1. Create a Quantity Basket (Keep real counts)
-    # Filter for valid items only
     valid_df = df[df['Quantity'] > 0]
-    
-    # This matrix contains actual quantities (e.g. 2, 5, 1)
     qty_basket = valid_df.groupby(['OrderID', level])['Quantity'].sum().unstack().fillna(0)
     
     # 2. Create Binary Basket for Algorithm (Strict 0/1)
@@ -172,36 +169,31 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     
     rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_conf)
     
-    # 3. Clean and Prepare basic columns
+    # 3. Clean columns
     rules['Support (%)'] = rules['support'] * 100
-    
-    # Flatten sets to strings
     rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
     
-    # --- SCIENTIFIC LOGIC: REMOVE SELF-ASSOCIATION ---
+    # Remove self-association for categories
     if level == 'Category':
         rules = rules[rules['Antecedent'] != rules['Consequent']]
     
-    # 4. CUSTOM LOGIC: "Let orders column represent total sum of items like 3+2"
-    # We iterate through rules to sum quantities of A and B ONLY in orders where both exist.
-    
-    def calculate_total_item_quantity(row):
+    # 4. CUSTOM LOGIC: "Split number in form of Antecedent + Consequent"
+    def calculate_split_quantity(row):
         ant = row['Antecedent']
         con = row['Consequent']
         
-        # Identify orders where BOTH antecedent and consequent exist
-        # We use the qty_basket which is aligned by OrderID
+        # Identify common orders
         common_orders_mask = (qty_basket[ant] > 0) & (qty_basket[con] > 0)
         
-        # Sum the quantities of Antecedent + Consequent for these specific orders
-        # This gives "3+2" logic without inflating the number of transaction events
-        qty_sum = qty_basket.loc[common_orders_mask, ant].sum() + qty_basket.loc[common_orders_mask, con].sum()
+        # Sum quantities separately
+        sum_ant = qty_basket.loc[common_orders_mask, ant].sum()
+        sum_con = qty_basket.loc[common_orders_mask, con].sum()
+        total = sum_ant + sum_con
         
-        return int(qty_sum)
+        return f"{int(total)} ({int(sum_ant)} + {int(sum_con)})"
 
-    # Overwrite 'No. of Orders' with this new Quantity Metric
-    rules['No. of Orders'] = rules.apply(calculate_total_item_quantity, axis=1)
+    rules['Total Item Qty'] = rules.apply(calculate_split_quantity, axis=1)
     
     def zhangs_metric(rule):
         sup = rule['support']
@@ -220,7 +212,7 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
     rules['pair_key'] = rules.apply(lambda x: frozenset([x['Antecedent'], x['Consequent']]), axis=1)
     rules = rules.drop_duplicates(subset=['pair_key'])
     
-    return rules[['Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang', 'conviction']]
+    return rules[['Antecedent', 'Consequent', 'Support (%)', 'Total Item Qty', 'confidence', 'lift', 'zhang', 'conviction']]
 
 def get_combo_analysis_full(df):
     valid_df = df[df['Quantity'] > 0]
@@ -264,6 +256,7 @@ def get_combo_analysis_full(df):
 
 def get_part3_strategy(rules_df):
     if rules_df.empty: return pd.DataFrame(), pd.DataFrame()
+    # Included 'Combo Value' in the copy
     proven = rules_df.sort_values('Times Sold Together', ascending=False).head(10).copy()
     potential = rules_df[~rules_df.index.isin(proven.index)]
     potential = potential[potential['lift'] > 1.5].sort_values('lift', ascending=False).head(10).copy()
@@ -478,76 +471,11 @@ if uploaded_file:
     with tab_day_wise:
         st.header("📅 Day-wise Deep Dive")
         
-        # 1. MOVED MATRIX VIEW HERE
-        st.subheader("Hourly Breakdown (Matrix View)")
-        st.markdown("Drill down: **Day** → **Date** → **Category** → **Hourly Matrix**.")
-        
-        days_list = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
-        day_selected = st.selectbox("1. Select Day of Week", days_list)
-        
-        day_df = df[df['DayOfWeek'] == day_selected]
-        
-        if not day_df.empty:
-            unique_dates = sorted(day_df['Date'].dt.strftime('%Y-%m-%d').unique())
-            date_options = [f"All {day_selected}s Combined"] + unique_dates
-            date_selected = st.selectbox(f"2. Select Date ({day_selected})", date_options)
-            
-            if date_selected == f"All {day_selected}s Combined":
-                target_df = day_df
-            else:
-                target_df = day_df[day_df['Date'].dt.strftime('%Y-%m-%d') == date_selected]
-            
-            unique_cats = sorted(df['Category'].unique())
-            cat_options = ["All Categories"] + unique_cats
-            category_selected = st.selectbox("3. Filter by Category", cat_options)
-            
-            if category_selected != "All Categories":
-                target_df = target_df[target_df['Category'] == category_selected]
-                st.caption(f"Showing **{category_selected}** items for **{date_selected}**.")
-            else:
-                st.caption(f"Showing **All Items** for **{date_selected}**.")
-
-            # 3-Day Quantity Logic for Matrix
-            df_3day = pd.DataFrame()
-            if date_selected == f"All {day_selected}s Combined":
-                curr_idx = days_list.index(day_selected)
-                prev_day = days_list[(curr_idx - 1) % 7]
-                next_day = days_list[(curr_idx + 1) % 7]
-                target_days = [prev_day, day_selected, next_day]
-                df_3day = df[df['DayOfWeek'].isin(target_days)]
-            else:
-                sel_dt = pd.to_datetime(date_selected)
-                target_dates = [sel_dt - timedelta(days=1), sel_dt, sel_dt + timedelta(days=1)]
-                df_3day = df[df['Date'].isin(target_dates)]
-
-            if category_selected != "All Categories":
-                df_3day = df_3day[df_3day['Category'] == category_selected]
-
-            qty_3day = df_3day.groupby('ItemName')['Quantity'].sum().rename("3-Day Qty")
-
-            # Matrix Construction
-            if not target_df.empty:
-                if not target_df.empty:
-                    pivot = target_df.groupby(['ItemName', 'Hour'])['Quantity'].sum().unstack(fill_value=0)
-                    for h in range(9, 24):
-                        if h not in pivot.columns: pivot[h] = 0
-                    pivot = pivot[sorted(pivot.columns)]
-                    pivot.columns = [f"{int(h)}-{int(h)+1}" for h in pivot.columns]
-                    pivot['Total Quantity'] = pivot.sum(axis=1)
-                    pivot = pivot.join(qty_3day, how='left').fillna(0)
-                    pivot['3-Day Qty'] = pivot['3-Day Qty'].astype(int)
-                    pivot = pivot.sort_values('Total Quantity', ascending=False)
-                    pivot.index = pivot.index.map(lambda x: f"★ {x}" if x in pareto_list else x)
-                    st.dataframe(pivot, use_container_width=True, height=600)
-                else: st.warning("No sales found for this selection.")
-            else: st.warning(f"No data found for Category: {category_selected} on this date.")
-        else: st.warning(f"No transactions found for {day_selected} in the uploaded file.")
-        
-        st.divider()
-        
         # 2. UPDATED TABLE: Items Not Worth Producing (WITH DROPDOWN FILTER & REFINED LOGIC & PARETO MARKER)
         st.subheader("⚠️ Items Not Worth Producing")
         st.markdown("Items with **< 3 units sold** in a 3-Day window. **Refined:** Only items with >0 sales on the specific day are shown.")
+        
+        days_list = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']
         
         # --- CATEGORY DROPDOWN FILTER ---
         available_categories = sorted(df['Category'].unique().tolist())
@@ -690,7 +618,7 @@ if uploaded_file:
         cat_stats = pd.merge(cat_stats, day_pivot, on='ItemName', how='left').fillna(0)
         cat_stats = cat_stats.sort_values('TotalAmount', ascending=False)
         
-        # --- NEW CHANGE: REVENUE MARKERS (**, *) ---
+        # --- REVENUE MARKERS (**, *) ---
         def mark_item_name(row):
             name = row['ItemName']
             rev = row['TotalAmount']
@@ -708,7 +636,6 @@ if uploaded_file:
             return name
 
         cat_stats['Item Name'] = cat_stats.apply(mark_item_name, axis=1)
-        # ------------------------------------------
         
         col_config = {
             "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"),
@@ -723,6 +650,64 @@ if uploaded_file:
         
         # Legend for the user
         st.caption("📝 **Legend:** `**` = Revenue < ₹500 (Critical) | `*` = Revenue < ₹1500 (Warning) | `★` = Pareto Top 80% Item")
+        st.divider()
+
+        # --- MOVED: HOURLY BREAKDOWN (MATRIX VIEW) ---
+        st.subheader(f"Hourly Breakdown Matrix ({selected_cat_deep_dive})")
+        st.markdown("Drill down: **Day** → **Date** → **Hourly Matrix**.")
+        
+        # We reuse the day_list defined above
+        day_selected_mat = st.selectbox("1. Select Day of Week", days_order, key='mat_day_select')
+        
+        day_df_mat = df[df['DayOfWeek'] == day_selected_mat]
+        
+        if not day_df_mat.empty:
+            unique_dates_mat = sorted(day_df_mat['Date'].dt.strftime('%Y-%m-%d').unique())
+            date_options_mat = [f"All {day_selected_mat}s Combined"] + unique_dates_mat
+            date_selected_mat = st.selectbox(f"2. Select Date ({day_selected_mat})", date_options_mat, key='mat_date_select')
+            
+            if date_selected_mat == f"All {day_selected_mat}s Combined":
+                target_df_mat = day_df_mat
+            else:
+                target_df_mat = day_df_mat[day_df_mat['Date'].dt.strftime('%Y-%m-%d') == date_selected_mat]
+            
+            # FORCE FILTER BY THE CATEGORY SELECTED IN THE PARENT TAB
+            target_df_mat = target_df_mat[target_df_mat['Category'] == selected_cat_deep_dive]
+            
+            if not target_df_mat.empty:
+                # 3-Day Quantity Logic for Matrix (Scoped to selected category)
+                df_3day_mat = pd.DataFrame()
+                if date_selected_mat == f"All {day_selected_mat}s Combined":
+                    curr_idx = days_order.index(day_selected_mat)
+                    prev_day = days_order[(curr_idx - 1) % 7]
+                    next_day = days_order[(curr_idx + 1) % 7]
+                    target_days = [prev_day, day_selected_mat, next_day]
+                    df_3day_mat = df[df['DayOfWeek'].isin(target_days)]
+                else:
+                    sel_dt_mat = pd.to_datetime(date_selected_mat)
+                    target_dates_mat = [sel_dt_mat - timedelta(days=1), sel_dt_mat, sel_dt_mat + timedelta(days=1)]
+                    df_3day_mat = df[df['Date'].isin(target_dates_mat)]
+
+                df_3day_mat = df_3day_mat[df_3day_mat['Category'] == selected_cat_deep_dive]
+                qty_3day_mat = df_3day_mat.groupby('ItemName')['Quantity'].sum().rename("3-Day Qty")
+
+                # Matrix Construction
+                pivot_mat = target_df_mat.groupby(['ItemName', 'Hour'])['Quantity'].sum().unstack(fill_value=0)
+                for h in range(9, 24):
+                    if h not in pivot_mat.columns: pivot_mat[h] = 0
+                pivot_mat = pivot_mat[sorted(pivot_mat.columns)]
+                pivot_mat.columns = [f"{int(h)}-{int(h)+1}" for h in pivot_mat.columns]
+                pivot_mat['Total Quantity'] = pivot_mat.sum(axis=1)
+                pivot_mat = pivot_mat.join(qty_3day_mat, how='left').fillna(0)
+                pivot_mat['3-Day Qty'] = pivot_mat['3-Day Qty'].astype(int)
+                pivot_mat = pivot_mat.sort_values('Total Quantity', ascending=False)
+                pivot_mat.index = pivot_mat.index.map(lambda x: f"★ {x}" if x in pareto_list else x)
+                st.dataframe(pivot_mat, use_container_width=True, height=600)
+            else:
+                st.warning(f"No sales found for category '{selected_cat_deep_dive}' on this selection.")
+        else:
+            st.warning(f"No transactions found for {day_selected_mat} in the uploaded file.")
+        
         st.divider()
 
     # --- TAB 2: PARETO ---
@@ -762,11 +747,13 @@ if uploaded_file:
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown("#### 🔥 Proven Winners")
-                if not proven_df.empty: st.dataframe(proven_df[['Specific Item Combo', 'Times Sold Together', 'Peak Hour']], hide_index=True, use_container_width=True)
+                # Added 'Combo Value' to dataframe
+                if not proven_df.empty: st.dataframe(proven_df[['Specific Item Combo', 'Times Sold Together', 'Combo Value', 'Peak Hour']], column_config={"Combo Value": st.column_config.NumberColumn("Combo Value", format="₹%.2f")}, hide_index=True, use_container_width=True)
                 else: st.info("No data.")
             with c2:
                 st.markdown("#### 💎 Hidden Gems")
-                if not potential_df.empty: st.dataframe(potential_df[['Specific Item Combo', 'lift', 'Peak Hour']], column_config={"lift": st.column_config.NumberColumn("Compatibility Score", format="%.2f")}, hide_index=True, use_container_width=True)
+                # Added 'Combo Value' to dataframe
+                if not potential_df.empty: st.dataframe(potential_df[['Specific Item Combo', 'lift', 'Combo Value', 'Peak Hour']], column_config={"lift": st.column_config.NumberColumn("Compatibility Score", format="%.2f"), "Combo Value": st.column_config.NumberColumn("Combo Value", format="₹%.2f")}, hide_index=True, use_container_width=True)
                 else: st.info("No hidden gems found.")
         combo_map = {"Part 1: Full Combo Map": render_part1, "Part 3: Strategic Recommendations": render_part3}
         for block in combo_order:
@@ -800,12 +787,12 @@ if uploaded_file:
             else:
                 assoc_rules['Status'] = "Category Level"
 
-            st.dataframe(assoc_rules[['Status', 'Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang', 'conviction']], column_config={"Status": st.column_config.TextColumn("Strategic Status"), "Support (%)": st.column_config.NumberColumn("Support %", format="%.2f"), "No. of Orders": st.column_config.NumberColumn("Total Items (Qty)", format="%d"), "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"), "lift": st.column_config.NumberColumn("Lift", format="%.2f"), "conviction": st.column_config.NumberColumn("Conviction", format="%.2f")}, hide_index=True, use_container_width=True, height=600)
+            st.dataframe(assoc_rules[['Status', 'Antecedent', 'Consequent', 'Support (%)', 'Total Item Qty', 'confidence', 'lift', 'zhang', 'conviction']], column_config={"Status": st.column_config.TextColumn("Strategic Status"), "Support (%)": st.column_config.NumberColumn("Support %", format="%.2f"), "Total Item Qty": st.column_config.TextColumn("Total Qty (Split)", width="medium"), "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"), "lift": st.column_config.NumberColumn("Lift", format="%.2f"), "conviction": st.column_config.NumberColumn("Conviction", format="%.2f")}, hide_index=True, use_container_width=True, height=600)
             
             fig = px.scatter(
                 assoc_rules, x="Support (%)", y="confidence", 
                 size="lift", color="zhang",
-                hover_data=["Antecedent", "Consequent", "No. of Orders"],
+                hover_data=["Antecedent", "Consequent", "Total Item Qty"],
                 title=f"Association Rules Landscape ({analysis_level} Level)",
                 color_continuous_scale=px.colors.diverging.RdBu
             )
