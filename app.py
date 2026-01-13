@@ -486,10 +486,20 @@ if uploaded_file:
         
         st.divider()
         
-        # 2. NEW TABLE: Items Not Worth Producing (< 3 units on 3-day rolling window)
+        # 2. UPDATED TABLE: Items Not Worth Producing (WITH NEW CATEGORY FILTER)
         st.subheader("⚠️ Items Not Worth Producing")
         st.markdown("Items with **< 3 units sold** in a 3-Day window (Day Before + Day + Day After) combined across all dates.")
         
+        # --- NEW ADDITION: CATEGORY FILTER ---
+        available_categories = sorted(df['Category'].unique().tolist())
+        selected_nw_categories = st.multiselect(
+            "Filter by Category",
+            options=available_categories,
+            default=available_categories,
+            key="nw_category_filter"
+        )
+        # -------------------------------------
+
         not_worth_dict = {}
         max_len = 0
         
@@ -502,6 +512,11 @@ if uploaded_file:
             
             # Filter Data
             window_df = df[df['DayOfWeek'].isin(window_days)]
+            
+            # --- APPLY CATEGORY FILTER TO DATA BEFORE CALCULATION ---
+            if selected_nw_categories:
+                window_df = window_df[window_df['Category'].isin(selected_nw_categories)]
+            # --------------------------------------------------------
             
             # Group Quantity
             item_sums = window_df.groupby('ItemName')['Quantity'].sum()
@@ -520,6 +535,55 @@ if uploaded_file:
         
         waste_df = pd.DataFrame(not_worth_dict)
         st.dataframe(waste_df, use_container_width=True, height=500)
+
+        # 3. NEW FEATURE: ORDERS BELOW AOV GRAPH
+        st.markdown("---")
+        st.subheader("📉 Missed Upsell Opportunities (Orders Below AOV)")
+        
+        # Calculate Monthly AOV
+        monthly_aov = df['TotalAmount'].sum() / df['OrderID'].nunique()
+        
+        # Group by Date
+        daily_aov_stats = df.groupby(df['Date'].dt.date).apply(
+            lambda x: pd.Series({
+                'Total Orders': len(x),
+                'Below AOV': (x['TotalAmount'] < monthly_aov).sum(),
+                'Percentage Below AOV': ((x['TotalAmount'] < monthly_aov).sum() / len(x)) * 100
+            })
+        ).reset_index()
+        daily_aov_stats.rename(columns={'Date': 'Day'}, inplace=True)
+        
+        # Plot Impressive Graph
+        fig_upsell = px.bar(
+            daily_aov_stats,
+            x='Day',
+            y='Percentage Below AOV',
+            title=f"Daily % of Orders Below Monthly Average (₹{monthly_aov:,.0f})",
+            color='Percentage Below AOV',
+            color_continuous_scale='RdYlGn_r', # Red = High (Bad), Green = Low (Good)
+            labels={'Percentage Below AOV': '% Low Value Orders'},
+            hover_data=['Total Orders', 'Below AOV']
+        )
+        
+        # Add Threshold Line
+        fig_upsell.add_hline(
+            y=50, 
+            line_dash="dot", 
+            line_color="red", 
+            annotation_text="Critical Threshold (50%)", 
+            annotation_position="top right"
+        )
+        
+        fig_upsell.update_layout(
+            xaxis_title=None,
+            yaxis_title="% of Orders < AOV",
+            coloraxis_showscale=False,
+            yaxis_range=[0, 100],
+            hovermode="x unified"
+        )
+        
+        st.plotly_chart(fig_upsell, use_container_width=True)
+        st.caption("Red bars indicate days where a high percentage of customers bought less than the average amount. These days require sales training.")
 
     # --- TAB: CATEGORY DETAILS ---
     with tab_cat:
