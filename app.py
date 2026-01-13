@@ -157,20 +157,51 @@ class HybridDemandForecaster:
 # --- COMBO & ASSOCIATION LOGIC ---
 
 def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
-    basket = df.groupby(['OrderID', level])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID')
+    # 1. Create a Quantity Basket (Keep real counts)
+    # Filter for valid items only
+    valid_df = df[df['Quantity'] > 0]
     
-    # Vectorized boolean conversion
-    basket_sets = (basket > 0)
+    # This matrix contains actual quantities (e.g. 2, 5, 1)
+    qty_basket = valid_df.groupby(['OrderID', level])['Quantity'].sum().unstack().fillna(0)
+    
+    # 2. Create Binary Basket for Algorithm (Strict 0/1)
+    basket_sets = (qty_basket > 0).astype(bool) 
     
     frequent_itemsets = fpgrowth(basket_sets, min_support=min_sup, use_colnames=True)
     if frequent_itemsets.empty: return pd.DataFrame()
+    
     rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_conf)
     
-    # Use basket length to avoid inflation errors
-    total_orders_in_model = len(basket)
-    rules['No. of Orders'] = (rules['support'] * total_orders_in_model).round().astype(int)
-    
+    # 3. Clean and Prepare basic columns
     rules['Support (%)'] = rules['support'] * 100
+    
+    # Flatten sets to strings
+    rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
+    rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
+    
+    # --- SCIENTIFIC LOGIC: REMOVE SELF-ASSOCIATION ---
+    if level == 'Category':
+        rules = rules[rules['Antecedent'] != rules['Consequent']]
+    
+    # 4. CUSTOM LOGIC: "Let orders column represent total sum of items like 3+2"
+    # We iterate through rules to sum quantities of A and B ONLY in orders where both exist.
+    
+    def calculate_total_item_quantity(row):
+        ant = row['Antecedent']
+        con = row['Consequent']
+        
+        # Identify orders where BOTH antecedent and consequent exist
+        # We use the qty_basket which is aligned by OrderID
+        common_orders_mask = (qty_basket[ant] > 0) & (qty_basket[con] > 0)
+        
+        # Sum the quantities of Antecedent + Consequent for these specific orders
+        # This gives "3+2" logic without inflating the number of transaction events
+        qty_sum = qty_basket.loc[common_orders_mask, ant].sum() + qty_basket.loc[common_orders_mask, con].sum()
+        
+        return int(qty_sum)
+
+    # Overwrite 'No. of Orders' with this new Quantity Metric
+    rules['No. of Orders'] = rules.apply(calculate_total_item_quantity, axis=1)
     
     def zhangs_metric(rule):
         sup = rule['support']
@@ -182,46 +213,51 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
         return numerator / denominator
 
     rules['zhang'] = rules.apply(zhangs_metric, axis=1)
-    rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
-    rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
-    
-    # --- ERROR FIX: REMOVE SELF-ASSOCIATION FOR CATEGORIES ---
-    # Scientific logic: We want cross-category insights (e.g., Sweets -> Savory), not Sweets -> Sweets.
-    if level == 'Category':
-        rules = rules[rules['Antecedent'] != rules['Consequent']]
-    # ---------------------------------------------------------
     
     rules = rules.sort_values('lift', ascending=False)
-    rules = rules.drop_duplicates(subset=['Antecedent', 'Consequent'])
+    
+    # Drop duplicates
+    rules['pair_key'] = rules.apply(lambda x: frozenset([x['Antecedent'], x['Consequent']]), axis=1)
+    rules = rules.drop_duplicates(subset=['pair_key'])
+    
     return rules[['Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang', 'conviction']]
 
 def get_combo_analysis_full(df):
-    basket = (df.groupby(['OrderID', 'ItemName'])['Quantity'].sum().unstack().reset_index().fillna(0).set_index('OrderID'))
+    valid_df = df[df['Quantity'] > 0]
+    basket = valid_df.groupby(['OrderID', 'ItemName'])['Quantity'].count().unstack().fillna(0)
     
-    # Vectorized integer conversion
+    # Vectorized boolean -> integer conversion
     basket_sets = (basket > 0).astype(int)
     
     frequent = apriori(basket_sets, min_support=0.005, use_colnames=True)
     if frequent.empty: return pd.DataFrame()
+    
     rules = association_rules(frequent, metric="lift", min_threshold=1.05)
+    
     rules['Item A'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['Item B'] = rules['consequents'].apply(lambda x: list(x)[0])
+    
+    # Filter out self-matches
+    rules = rules[rules['Item A'] != rules['Item B']]
+    
     rules['pair'] = rules.apply(lambda x: tuple(sorted([x['Item A'], x['Item B']])), axis=1)
     rules = rules.drop_duplicates(subset='pair')
+    
     item_cat_map = df.set_index('ItemName')['Category'].to_dict()
     rules['Category A'] = rules['Item A'].map(item_cat_map)
     rules['Category B'] = rules['Item B'].map(item_cat_map)
     rules['Specific Item Combo'] = rules['Item A'] + " + " + rules['Item B']
-    total_orders = df['OrderID'].nunique()
-    rules['Times Sold Together'] = (rules['support'] * total_orders).astype(int)
+    
+    # Recalculate exact Order Count based on support * total transactions
+    total_transactions = len(basket_sets)
+    rules['Times Sold Together'] = (rules['support'] * total_transactions).round().astype(int)
+    
     rules['Peak Hour'] = rules.apply(lambda x: get_peak_hour_for_pair(df, x['Item A'], x['Item B']), axis=1)
     
-    # Calculate average price for each item (Total Sales / Total Qty) to handle variable pricing
+    # Combo Value Logic
     item_avg_price = df.groupby('ItemName').apply(
         lambda x: x['TotalAmount'].sum() / x['Quantity'].sum() if x['Quantity'].sum() > 0 else 0
     ).to_dict()
-    
-    # Map prices to combo
     rules['Combo Value'] = rules['Item A'].map(item_avg_price).fillna(0) + rules['Item B'].map(item_avg_price).fillna(0)
     
     return rules
@@ -764,7 +800,7 @@ if uploaded_file:
             else:
                 assoc_rules['Status'] = "Category Level"
 
-            st.dataframe(assoc_rules[['Status', 'Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang', 'conviction']], column_config={"Status": st.column_config.TextColumn("Strategic Status"), "Support (%)": st.column_config.NumberColumn("Support %", format="%.2f"), "No. of Orders": st.column_config.NumberColumn("Orders", format="%d"), "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"), "lift": st.column_config.NumberColumn("Lift", format="%.2f"), "conviction": st.column_config.NumberColumn("Conviction", format="%.2f")}, hide_index=True, use_container_width=True, height=600)
+            st.dataframe(assoc_rules[['Status', 'Antecedent', 'Consequent', 'Support (%)', 'No. of Orders', 'confidence', 'lift', 'zhang', 'conviction']], column_config={"Status": st.column_config.TextColumn("Strategic Status"), "Support (%)": st.column_config.NumberColumn("Support %", format="%.2f"), "No. of Orders": st.column_config.NumberColumn("Total Items (Qty)", format="%d"), "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"), "lift": st.column_config.NumberColumn("Lift", format="%.2f"), "conviction": st.column_config.NumberColumn("Conviction", format="%.2f")}, hide_index=True, use_container_width=True, height=600)
             
             fig = px.scatter(
                 assoc_rules, x="Support (%)", y="confidence", 
