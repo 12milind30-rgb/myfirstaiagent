@@ -486,7 +486,7 @@ if uploaded_file:
         
         st.divider()
         
-        # 2. UPDATED TABLE: Items Not Worth Producing (WITH DROPDOWN FILTER & REFINED LOGIC)
+        # 2. UPDATED TABLE: Items Not Worth Producing (WITH DROPDOWN FILTER & REFINED LOGIC & PARETO MARKER)
         st.subheader("⚠️ Items Not Worth Producing")
         st.markdown("Items with **< 3 units sold** in a 3-Day window. **Refined:** Only items with >0 sales on the specific day are shown.")
         
@@ -538,7 +538,10 @@ if uploaded_file:
             
             # Intersection: Candidate (<3 total) AND Active (>0 today)
             final_items = [item for item in candidate_items if item in active_items_today]
-            # ---------------------------------------------------------------
+            
+            # --- APPLY PARETO STAR MARKER ---
+            final_items = [f"★ {x}" if x in pareto_list else x for x in final_items]
+            # --------------------------------
 
             not_worth_dict[d] = final_items
             if len(final_items) > max_len:
