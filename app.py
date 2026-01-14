@@ -156,6 +156,64 @@ class HybridDemandForecaster:
 
 # --- COMBO & ASSOCIATION LOGIC ---
 
+def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
+    # 1. Create a Quantity Basket (Keep real counts)
+    valid_df = df[df['Quantity'] > 0]
+    qty_basket = valid_df.groupby(['OrderID', level])['Quantity'].sum().unstack().fillna(0)
+    
+    # 2. Create Binary Basket for Algorithm (Strict 0/1)
+    basket_sets = (qty_basket > 0).astype(bool) 
+    
+    frequent_itemsets = fpgrowth(basket_sets, min_support=min_sup, use_colnames=True)
+    if frequent_itemsets.empty: return pd.DataFrame()
+    
+    rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_conf)
+    
+    # 3. Clean columns
+    rules['Support (%)'] = rules['support'] * 100
+    rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
+    rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
+    
+    # Remove self-association for categories
+    if level == 'Category':
+        rules = rules[rules['Antecedent'] != rules['Consequent']]
+    
+    # 4. CUSTOM LOGIC: "Split number in form of Antecedent + Consequent"
+    def calculate_split_quantity(row):
+        ant = row['Antecedent']
+        con = row['Consequent']
+        
+        # Identify common orders
+        common_orders_mask = (qty_basket[ant] > 0) & (qty_basket[con] > 0)
+        
+        # Sum quantities separately
+        sum_ant = qty_basket.loc[common_orders_mask, ant].sum()
+        sum_con = qty_basket.loc[common_orders_mask, con].sum()
+        total = sum_ant + sum_con
+        
+        return f"{int(total)} ({int(sum_ant)} + {int(sum_con)})"
+
+    rules['Total Item Qty'] = rules.apply(calculate_split_quantity, axis=1)
+    
+    def zhangs_metric(rule):
+        sup = rule['support']
+        sup_a = rule['antecedent support']
+        sup_c = rule['consequent support']
+        numerator = sup - (sup_a * sup_c)
+        denominator = max(sup * (1 - sup_a), sup_a * (sup_c - sup))
+        if denominator == 0: return 0
+        return numerator / denominator
+
+    rules['zhang'] = rules.apply(zhangs_metric, axis=1)
+    
+    rules = rules.sort_values('lift', ascending=False)
+    
+    # Drop duplicates
+    rules['pair_key'] = rules.apply(lambda x: frozenset([x['Antecedent'], x['Consequent']]), axis=1)
+    rules = rules.drop_duplicates(subset=['pair_key'])
+    
+    return rules[['Antecedent', 'Consequent', 'Support (%)', 'Total Item Qty', 'confidence', 'lift', 'zhang', 'conviction']]
+
 def get_combo_analysis_full(df):
     valid_df = df[df['Quantity'] > 0]
     basket = valid_df.groupby(['OrderID', 'ItemName'])['Quantity'].count().unstack().fillna(0)
@@ -662,6 +720,20 @@ if uploaded_file:
         
         st.divider()
 
+    # --- TAB 2: PARETO ---
+    with tab2:
+        st.header("🏆 Pareto Analysis")
+        pareto_df, ratio_msg, menu_perc = analyze_pareto_hierarchical(df)
+        st.info(f"💡 **Insight:** {ratio_msg} (Only {menu_perc:.1f}% of your menu!)")
+        pareto_df['ItemName'] = pareto_df['ItemName'].apply(lambda x: f"★ {x}")
+        st.dataframe(pareto_df, column_config={"CatContrib": st.column_config.NumberColumn("Category Share %", format="%.2f%%"), "ItemContrib": st.column_config.NumberColumn("Item Share % (Global)", format="%.2f%%"), "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")}, hide_index=True, height=600, use_container_width=True)
+
+    # --- TAB 3: TIME SERIES ---
+    with tab3:
+        st.header("📅 Daily Trends")
+        n_ts = st.slider("Number of items per category (Top N by Revenue)", 5, 30, 5)
+        plot_time_series_fixed(df, pareto_list, n_ts)
+
     # --- TAB 4: SMART COMBOS (UPDATED WITH STARS) ---
     with tab4:
         st.header("🍔 Smart Combo Strategy")
@@ -733,9 +805,10 @@ if uploaded_file:
 
         with c2:
             # Slider operates in Percentage (0-100), converted to float (0-1) for algo
-            min_support_percent = st.slider("Minimum Support (%)", 0.1, max_sup_percent, default_val, step=0.1, format="%.1f%%")
+            # --- FIX: INCREASED PRECISION TO 0.01 ---
+            min_support_percent = st.slider("Minimum Support (%)", 0.01, max_sup_percent, default_val, step=0.01, format="%.2f%%")
+            # ----------------------------------------
             min_support_val = min_support_percent / 100.0
-        # ------------------------------------------
         
         with st.spinner("Running FP-Growth Algorithm..."):
             frequent_itemsets = fpgrowth(basket_sets_global, min_support=min_support_val, use_colnames=True)
