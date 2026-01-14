@@ -156,64 +156,6 @@ class HybridDemandForecaster:
 
 # --- COMBO & ASSOCIATION LOGIC ---
 
-def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
-    # 1. Create a Quantity Basket (Keep real counts)
-    valid_df = df[df['Quantity'] > 0]
-    qty_basket = valid_df.groupby(['OrderID', level])['Quantity'].sum().unstack().fillna(0)
-    
-    # 2. Create Binary Basket for Algorithm (Strict 0/1)
-    basket_sets = (qty_basket > 0).astype(bool) 
-    
-    frequent_itemsets = fpgrowth(basket_sets, min_support=min_sup, use_colnames=True)
-    if frequent_itemsets.empty: return pd.DataFrame()
-    
-    rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_conf)
-    
-    # 3. Clean columns
-    rules['Support (%)'] = rules['support'] * 100
-    rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
-    rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
-    
-    # Remove self-association for categories
-    if level == 'Category':
-        rules = rules[rules['Antecedent'] != rules['Consequent']]
-    
-    # 4. CUSTOM LOGIC: "Split number in form of Antecedent + Consequent"
-    def calculate_split_quantity(row):
-        ant = row['Antecedent']
-        con = row['Consequent']
-        
-        # Identify common orders
-        common_orders_mask = (qty_basket[ant] > 0) & (qty_basket[con] > 0)
-        
-        # Sum quantities separately
-        sum_ant = qty_basket.loc[common_orders_mask, ant].sum()
-        sum_con = qty_basket.loc[common_orders_mask, con].sum()
-        total = sum_ant + sum_con
-        
-        return f"{int(total)} ({int(sum_ant)} + {int(sum_con)})"
-
-    rules['Total Item Qty'] = rules.apply(calculate_split_quantity, axis=1)
-    
-    def zhangs_metric(rule):
-        sup = rule['support']
-        sup_a = rule['antecedent support']
-        sup_c = rule['consequent support']
-        numerator = sup - (sup_a * sup_c)
-        denominator = max(sup * (1 - sup_a), sup_a * (sup_c - sup))
-        if denominator == 0: return 0
-        return numerator / denominator
-
-    rules['zhang'] = rules.apply(zhangs_metric, axis=1)
-    
-    rules = rules.sort_values('lift', ascending=False)
-    
-    # Drop duplicates
-    rules['pair_key'] = rules.apply(lambda x: frozenset([x['Antecedent'], x['Consequent']]), axis=1)
-    rules = rules.drop_duplicates(subset=['pair_key'])
-    
-    return rules[['Antecedent', 'Consequent', 'Support (%)', 'Total Item Qty', 'confidence', 'lift', 'zhang', 'conviction']]
-
 def get_combo_analysis_full(df):
     valid_df = df[df['Quantity'] > 0]
     basket = valid_df.groupby(['OrderID', 'ItemName'])['Quantity'].count().unstack().fillna(0)
@@ -362,11 +304,9 @@ if uploaded_file:
     pareto_count = len(pareto_list)
     
     # --- MOVED PRE-CALCULATIONS FOR GLOBAL USE ---
-    # Smart Combo data calculation (for Proven/Potential lists)
     rules_df = get_combo_analysis_full(df)
     proven_df, potential_df = get_part3_strategy(rules_df)
     
-    # Lists for lookup
     proven_list = []
     potential_list = []
     if not proven_df.empty: proven_list = proven_df['pair'].tolist()
@@ -739,9 +679,6 @@ if uploaded_file:
             if input_df.empty: return input_df
             df_display = input_df.copy()
             # Apply star logic to "Specific Item Combo" column (re-create it)
-            # The structure is "Item A + Item B". We need to reconstruct it with stars.
-            # Assuming 'Item A' and 'Item B' columns exist (they do in rules_df)
-            
             if 'Item A' in df_display.columns and 'Item B' in df_display.columns:
                 df_display['Item A Display'] = df_display['Item A'].apply(star_combo_string)
                 df_display['Item B Display'] = df_display['Item B'].apply(star_combo_string)
@@ -780,27 +717,95 @@ if uploaded_file:
         c1, c2 = st.columns(2)
         with c1:
             analysis_level = st.radio("Analysis Level", ["ItemName", "Category"], horizontal=True)
-        with c2:
-            # --- FIX: SLIDER FUNCTIONALITY IMPROVED ---
-            min_support_slider = st.slider("Minimum Support (Frequency)", 0.001, 1.0, 0.005, step=0.001, format="%.3f")
-            # ------------------------------------------
         
-        with st.spinner("Running FP-Growth Algorithm..."):
-            assoc_rules = run_advanced_association(df, level=analysis_level, min_sup=min_support_slider)
+        # --- FIX: DYNAMIC SLIDER LOGIC ---
+        # 1. Create baskets once to find max support
+        valid_df_global = df[df['Quantity'] > 0]
+        basket_global = valid_df_global.groupby(['OrderID', analysis_level])['Quantity'].count().unstack().fillna(0)
+        basket_sets_global = (basket_global > 0).astype(bool)
+        
+        # 2. Run FP Growth strictly to get Supports
+        frequent_global = fpgrowth(basket_sets_global, min_support=0.001, use_colnames=True)
+        
+        if not frequent_global.empty:
+            max_sup = frequent_global['support'].max()
+            # Safety cap at 1.0, minimum at 0.002
+            slider_max = float(min(1.0, max_sup + 0.01))
+            slider_min = 0.001
+            slider_default = max(slider_min, min(0.005, slider_max / 2)) # Heuristic default
+        else:
+            slider_max = 1.0
+            slider_min = 0.001
+            slider_default = 0.005
+
+        with c2:
+            min_support_slider = st.slider("Minimum Support (Frequency)", slider_min, slider_max, slider_default, step=0.001, format="%.3f")
+        # ------------------------------------------
+        
+        with st.spinner("Running Association Rules..."):
+            # Filter the already computed frequent sets
+            filtered_frequent = frequent_global[frequent_global['support'] >= min_support_slider]
+            
+            if filtered_frequent.empty:
+                assoc_rules = pd.DataFrame()
+            else:
+                assoc_rules = association_rules(filtered_frequent, metric="confidence", min_threshold=0.1)
+                
+                # --- APPLYING THE LOGIC FIXES FROM PREVIOUS STEPS ---
+                # 1. Total Item Qty Logic
+                # Need to reconstruct specific logic here since we ran fpgrowth outside function
+                # Or just call the function? calling the function is cleaner but repeats fpgrowth.
+                # Let's perform the cleaning logic here on 'assoc_rules'
+                
+                total_transactions_processed = len(basket_sets_global)
+                assoc_rules['No. of Orders'] = (assoc_rules['support'] * total_transactions_processed).round().astype(int)
+                assoc_rules['Support (%)'] = assoc_rules['support'] * 100
+                
+                # Metric cleaning
+                def zhangs_metric(rule):
+                    sup = rule['support']
+                    sup_a = rule['antecedent support']
+                    sup_c = rule['consequent support']
+                    numerator = sup - (sup_a * sup_c)
+                    denominator = max(sup * (1 - sup_a), sup_a * (sup_c - sup))
+                    if denominator == 0: return 0
+                    return numerator / denominator
+                
+                assoc_rules['zhang'] = assoc_rules.apply(zhangs_metric, axis=1)
+                assoc_rules['Antecedent'] = assoc_rules['antecedents'].apply(lambda x: list(x)[0])
+                assoc_rules['Consequent'] = assoc_rules['consequents'].apply(lambda x: list(x)[0])
+                
+                if analysis_level == 'Category':
+                    assoc_rules = assoc_rules[assoc_rules['Antecedent'] != assoc_rules['Consequent']]
+                
+                # Calculate Split Quantity
+                # Need Quantity Basket
+                qty_basket_global = valid_df_global.groupby(['OrderID', analysis_level])['Quantity'].sum().unstack().fillna(0)
+                
+                def calculate_split_quantity(row):
+                    ant = row['Antecedent']
+                    con = row['Consequent']
+                    common_orders_mask = (qty_basket_global[ant] > 0) & (qty_basket_global[con] > 0)
+                    sum_ant = qty_basket_global.loc[common_orders_mask, ant].sum()
+                    sum_con = qty_basket_global.loc[common_orders_mask, con].sum()
+                    total = sum_ant + sum_con
+                    return f"{int(total)} ({int(sum_ant)} + {int(sum_con)})"
+
+                assoc_rules['Total Item Qty'] = assoc_rules.apply(calculate_split_quantity, axis=1)
+                
+                # Sanitize
+                assoc_rules = assoc_rules.sort_values('lift', ascending=False)
+                assoc_rules['pair_key'] = assoc_rules.apply(lambda x: frozenset([x['Antecedent'], x['Consequent']]), axis=1)
+                assoc_rules = assoc_rules.drop_duplicates(subset=['pair_key'])
         
         if not assoc_rules.empty:
             assoc_rules = assoc_rules.sort_values('lift', ascending=False).head(50)
             
             # --- RESTORED: STRATEGIC STATUS LOGIC (WINNER/GEM) ---
             def get_status(row):
-                # Only applicable for Item Level
                 if analysis_level != 'ItemName':
                     return "Category Level"
-                
-                # Check based on sorted pair match
                 current_pair = tuple(sorted([row['Antecedent'], row['Consequent']]))
-                
-                # Check against global lists generated earlier
                 if current_pair in proven_list: return "🔥 Proven Winner"
                 elif current_pair in potential_list: return "💎 Hidden Gem"
                 return "Normal"
