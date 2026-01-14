@@ -241,9 +241,9 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1, 
     rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
     
-    # Self-reference check (Category level shouldn't match itself)
-    if level == 'Category':
-        rules = rules[rules['Antecedent'] != rules['Consequent']]
+    # --- UPDATED: REMOVED CATEGORY SELF-REFERENCE CHECK TO FIX USER ISSUE ---
+    # if level == 'Category':
+    #     rules = rules[rules['Antecedent'] != rules['Consequent']]
         
     rules['Total Qty (Split)'] = rules.apply(lambda x: f"{x['Qty A'] + x['Qty B']} ({x['Qty A']} + {x['Qty B']})", axis=1)
     
