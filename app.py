@@ -25,6 +25,28 @@ warnings.filterwarnings('ignore')
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Mithas Intelligence 10.5", layout="wide")
 
+# --- FORCE DARK MODE VIA CSS ---
+# This ensures the dashboard is dark at all hours, regardless of system settings
+st.markdown("""
+<style>
+    [data-testid="stAppViewContainer"] {
+        background-color: #0E1117;
+        color: #FAFAFA;
+    }
+    [data-testid="stSidebar"] {
+        background-color: #262730;
+        color: #FAFAFA;
+    }
+    [data-testid="stHeader"] {
+        background-color: rgba(0,0,0,0);
+    }
+    div[data-baseweb="select"] > div {
+        background-color: #0E1117;
+        color: white;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 # --- DATA PROCESSING ---
 @st.cache_data
 def load_data(file):
@@ -200,7 +222,6 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1, 
     valid_df = df[df['Quantity'] > 0]
     
     # Group by Transaction to get the "Basket"
-    # We use 'count' to ensure binary existence check later, but sum() for quantity stats
     qty_basket = valid_df.groupby(['OrderID', level])['Quantity'].sum().unstack(fill_value=0)
     
     # Boolean Basket for FP-Growth (0/1)
@@ -213,7 +234,6 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1, 
     rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_conf)
     
     # 3. Logic: Calculate "Times Sold Together" (Transaction Count)
-    # This is the critical fix for the "0.14% Support" noise.
     def get_transaction_stats(row):
         ant = list(row['antecedents'])[0]
         con = list(row['consequents'])[0]
@@ -267,7 +287,8 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1, 
     
     rules = rules.sort_values('Times Sold Together', ascending=False)
     
-    return rules[['Antecedent', 'Consequent', 'Times Sold Together', 'Support (%)', 'Total Qty (Split)', 'confidence', 'lift', 'zhang']]
+    # --- UPDATED: Added 'conviction' to the return list ---
+    return rules[['Antecedent', 'Consequent', 'Times Sold Together', 'Support (%)', 'Total Qty (Split)', 'confidence', 'lift', 'zhang', 'conviction']]
 
 def get_combo_analysis_full(df):
     valid_df = df[df['Quantity'] > 0]
@@ -395,7 +416,8 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         daily = subset.groupby(['Date', 'ItemName'])['Quantity'].sum().reset_index()
         if daily.empty: continue
         daily['Legend Name'] = daily['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
-        fig = px.line(daily, x='Date', y='Quantity', color='Legend Name', markers=True)
+        # --- UPDATED: Added plotly_dark template ---
+        fig = px.line(daily, x='Date', y='Quantity', color='Legend Name', markers=True, template="plotly_dark")
         
         for item in top_items:
             avg_val = daily[daily['ItemName'] == item]['Quantity'].mean()
@@ -457,7 +479,8 @@ if uploaded_file:
                 st.subheader("⌚ Peak Hours Graph")
                 if 'Hour' in df.columns:
                     hourly = df.groupby('Hour')['TotalAmount'].sum().reset_index()
-                    fig_hourly = px.bar(hourly, x='Hour', y='TotalAmount')
+                    # --- UPDATED: Added plotly_dark template ---
+                    fig_hourly = px.bar(hourly, x='Hour', y='TotalAmount', template="plotly_dark")
                     avg_hourly = hourly['TotalAmount'].mean()
                     fig_hourly.add_hline(y=avg_hourly, line_dash="dash", line_color="red", 
                                          annotation_text=f"Avg: ₹{avg_hourly:,.0f}", annotation_position="top right")
@@ -467,10 +490,13 @@ if uploaded_file:
                 st.subheader("📅 Peak Days Graph")
                 daily_peak = df.groupby('DayOfWeek')['TotalAmount'].sum().reindex(
                     ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']).reset_index()
-                fig_daily = px.bar(daily_peak, x='DayOfWeek', y='TotalAmount')
+                # --- UPDATED: Added plotly_dark template ---
+                fig_daily = px.bar(daily_peak, x='DayOfWeek', y='TotalAmount', template="plotly_dark")
+                
+                # --- UPDATED: REMOVED BOLD (Arial Black) AND EXPLICIT BLACK COLOR ---
                 fig_daily.update_xaxes(
-                    tickfont=dict(family='Arial Black', size=14, color='black'),
-                    title_font=dict(family='Arial Black', size=16)
+                    tickfont=dict(size=14), # Removed family='Arial Black' and color='black'
+                    title_font=dict(size=16)
                 )
                 st.plotly_chart(fig_daily, use_container_width=True)
             st.divider()
@@ -508,7 +534,8 @@ if uploaded_file:
         def render_contributions():
             cat_cont = get_contribution_lists(df)
             st.subheader("📂 Category Contribution")
-            fig_pie = px.pie(cat_cont, values='TotalAmount', names='Category', hole=0.3)
+            # --- UPDATED: Added plotly_dark template ---
+            fig_pie = px.pie(cat_cont, values='TotalAmount', names='Category', hole=0.3, template="plotly_dark")
             st.plotly_chart(fig_pie, use_container_width=True)
             st.divider()
 
@@ -603,6 +630,7 @@ if uploaded_file:
         ).reset_index()
         daily_aov_stats.rename(columns={'Date': 'Day'}, inplace=True)
         
+        # --- UPDATED: Added plotly_dark template ---
         fig_upsell = px.bar(
             daily_aov_stats,
             x='Day',
@@ -611,7 +639,8 @@ if uploaded_file:
             color='Percentage Below AOV',
             color_continuous_scale='RdYlGn_r', 
             labels={'Percentage Below AOV': '% Low Value Orders'},
-            hover_data=['Total Orders', 'Below AOV']
+            hover_data=['Total Orders', 'Below AOV'],
+            template="plotly_dark"
         )
         
         fig_upsell.add_hline(
@@ -813,6 +842,7 @@ if uploaded_file:
         # Smart Defaults
         supports = basket_sets_global.mean().sort_values(ascending=False)
         max_sup = supports.max() if not supports.empty else 1.0
+        
         max_sup_percent = float(min(100.0, max_sup * 100 + 1.0)) 
         
         with c2:
@@ -847,6 +877,7 @@ if uploaded_file:
                     assoc_rules['Consequent'] = assoc_rules['Consequent'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
 
                 # DISPLAY
+                # --- UPDATED: Added 'conviction' to column config ---
                 st.dataframe(
                     assoc_rules,
                     column_config={
@@ -856,7 +887,8 @@ if uploaded_file:
                         "Total Qty (Split)": st.column_config.TextColumn("Total Qty (A + B)", width="medium"),
                         "confidence": st.column_config.NumberColumn("Confidence", format="%.2f"),
                         "lift": st.column_config.NumberColumn("Lift", format="%.2f"),
-                        "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f")
+                        "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"),
+                        "conviction": st.column_config.NumberColumn("Conviction", format="%.2f")
                     },
                     hide_index=True, 
                     use_container_width=True, 
@@ -864,12 +896,14 @@ if uploaded_file:
                 )
                 
                 # Plot
+                # --- UPDATED: Added plotly_dark template ---
                 fig = px.scatter(
                     assoc_rules, x="Support (%)", y="confidence", 
                     size="Times Sold Together", color="lift",
                     hover_data=["Antecedent", "Consequent", "Total Qty (Split)"],
                     title=f"Association Rules Landscape ({analysis_level} Level)",
-                    color_continuous_scale=px.colors.diverging.RdBu
+                    color_continuous_scale=px.colors.diverging.RdBu,
+                    template="plotly_dark"
                 )
                 st.plotly_chart(fig, use_container_width=True)
             
@@ -917,7 +951,13 @@ if uploaded_file:
                             fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['Prophet_View'], mode='lines', name='Prophet View', line=dict(dash='dot', color='blue', width=1), visible='legendonly'))
                             fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['XGB_View'], mode='lines', name='XGBoost View', line=dict(dash='dot', color='red', width=1), visible='legendonly'))
                             
-                            fig.update_layout(title="30-Day Demand Forecast", xaxis_title="Date", yaxis_title="Predicted Quantity", template="plotly_white")
+                            # --- UPDATED: Added plotly_dark template ---
+                            fig.update_layout(
+                                title="30-Day Demand Forecast", 
+                                xaxis_title="Date", 
+                                yaxis_title="Predicted Quantity", 
+                                template="plotly_dark"
+                            )
                             st.plotly_chart(fig, use_container_width=True)
                             
                             st.markdown("#### Detailed Forecast Data")
