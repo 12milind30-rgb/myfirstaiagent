@@ -787,7 +787,10 @@ if uploaded_file:
                 assoc_rules = assoc_rules.drop_duplicates(subset=['pair_key'])
         
         if not assoc_rules.empty:
-            assoc_rules = assoc_rules.sort_values('lift', ascending=False).head(50)
+            # --- FIX: REMOVE ROW LIMIT ---
+            # Previously limited to head(50), hiding high support items.
+            assoc_rules = assoc_rules.sort_values('lift', ascending=False)
+            # -----------------------------
             
             # --- RESTORED: STRATEGIC STATUS LOGIC (WINNER/GEM) ---
             def get_status(row):
