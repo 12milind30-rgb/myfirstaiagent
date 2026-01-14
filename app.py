@@ -722,57 +722,68 @@ if uploaded_file:
         
         st.divider()
 
-    # --- TAB 2: PARETO ---
-    with tab2:
-        st.header("🏆 Pareto Analysis")
-        pareto_df, ratio_msg, menu_perc = analyze_pareto_hierarchical(df)
-        st.info(f"💡 **Insight:** {ratio_msg} (Only {menu_perc:.1f}% of your menu!)")
-        pareto_df['ItemName'] = pareto_df['ItemName'].apply(lambda x: f"★ {x}")
-        st.dataframe(pareto_df, column_config={"CatContrib": st.column_config.NumberColumn("Category Share %", format="%.2f%%"), "ItemContrib": st.column_config.NumberColumn("Item Share % (Global)", format="%.2f%%"), "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d")}, hide_index=True, height=600, use_container_width=True)
-
-    # --- TAB 3: TIME SERIES ---
-    with tab3:
-        st.header("📅 Daily Trends")
-        n_ts = st.slider("Number of items per category (Top N by Revenue)", 5, 30, 5)
-        plot_time_series_fixed(df, pareto_list, n_ts)
-
-    # --- TAB 4: SMART COMBOS ---
+    # --- TAB 4: SMART COMBOS (UPDATED WITH STARS) ---
     with tab4:
         st.header("🍔 Smart Combo Strategy")
         with st.expander("🛠️ Reorder Combo Layout"):
             combo_order = st.multiselect("Section Order", ["Part 1: Full Combo Map", "Part 3: Strategic Recommendations"], default=["Part 1: Full Combo Map", "Part 3: Strategic Recommendations"])
         
+        # --- NEW HELPER: ADD STARS TO ITEM NAMES IN COMBOS ---
+        def star_combo_string(item_name):
+            # Check if item_name is in pareto list
+            if item_name in pareto_list:
+                return f"★ {item_name}"
+            return item_name
+
+        def process_combo_df_for_display(input_df):
+            if input_df.empty: return input_df
+            df_display = input_df.copy()
+            # Apply star logic to "Specific Item Combo" column (re-create it)
+            # The structure is "Item A + Item B". We need to reconstruct it with stars.
+            # Assuming 'Item A' and 'Item B' columns exist (they do in rules_df)
+            
+            if 'Item A' in df_display.columns and 'Item B' in df_display.columns:
+                df_display['Item A Display'] = df_display['Item A'].apply(star_combo_string)
+                df_display['Item B Display'] = df_display['Item B'].apply(star_combo_string)
+                df_display['Specific Item Combo'] = df_display['Item A Display'] + " + " + df_display['Item B Display']
+            return df_display
+
+        rules_display = process_combo_df_for_display(rules_df)
+        proven_display = process_combo_df_for_display(proven_df)
+        potential_display = process_combo_df_for_display(potential_df)
+        # -----------------------------------------------------
+
         def render_part1():
             st.subheader("1️⃣ Part 1: Full Category + Item Combo Map")
-            if not rules_df.empty:
+            if not rules_display.empty:
                 display_cols = ['Category A', 'Category B', 'Specific Item Combo', 'Times Sold Together', 'Combo Value', 'Peak Hour', 'lift']
-                st.dataframe(rules_df[display_cols].sort_values('Times Sold Together', ascending=False), column_config={"Specific Item Combo": st.column_config.TextColumn("Item A + Item B", width="medium"), "lift": st.column_config.NumberColumn("Lift Strength", format="%.2f"), "Combo Value": st.column_config.NumberColumn("Combo Value", format="₹%.2f")}, hide_index=True, use_container_width=True)
+                st.dataframe(rules_display[display_cols].sort_values('Times Sold Together', ascending=False), column_config={"Specific Item Combo": st.column_config.TextColumn("Item A + Item B", width="medium"), "lift": st.column_config.NumberColumn("Lift Strength", format="%.2f"), "Combo Value": st.column_config.NumberColumn("Combo Value", format="₹%.2f")}, hide_index=True, use_container_width=True)
             else: st.warning("No significant combos found.")
         def render_part3():
             st.subheader("3️⃣ Part 3: Strategic Recommendations")
             c1, c2 = st.columns(2)
             with c1:
                 st.markdown("#### 🔥 Proven Winners")
-                # Added 'Combo Value' to dataframe
-                if not proven_df.empty: st.dataframe(proven_df[['Specific Item Combo', 'Times Sold Together', 'Combo Value', 'Peak Hour']], column_config={"Combo Value": st.column_config.NumberColumn("Combo Value", format="₹%.2f")}, hide_index=True, use_container_width=True)
+                if not proven_display.empty: st.dataframe(proven_display[['Specific Item Combo', 'Times Sold Together', 'Combo Value', 'Peak Hour']], column_config={"Combo Value": st.column_config.NumberColumn("Combo Value", format="₹%.2f")}, hide_index=True, use_container_width=True)
                 else: st.info("No data.")
             with c2:
                 st.markdown("#### 💎 Hidden Gems")
-                # Added 'Combo Value' to dataframe
-                if not potential_df.empty: st.dataframe(potential_df[['Specific Item Combo', 'lift', 'Combo Value', 'Peak Hour']], column_config={"lift": st.column_config.NumberColumn("Compatibility Score", format="%.2f"), "Combo Value": st.column_config.NumberColumn("Combo Value", format="₹%.2f")}, hide_index=True, use_container_width=True)
+                if not potential_display.empty: st.dataframe(potential_display[['Specific Item Combo', 'lift', 'Combo Value', 'Peak Hour']], column_config={"lift": st.column_config.NumberColumn("Compatibility Score", format="%.2f"), "Combo Value": st.column_config.NumberColumn("Combo Value", format="₹%.2f")}, hide_index=True, use_container_width=True)
                 else: st.info("No hidden gems found.")
         combo_map = {"Part 1: Full Combo Map": render_part1, "Part 3: Strategic Recommendations": render_part3}
         for block in combo_order:
             if block in combo_map: combo_map[block]()
     
-    # --- TAB 5: ASSOCIATION ANALYSIS ---
+    # --- TAB 5: ASSOCIATION ANALYSIS (FIXED SLIDER & STATUS) ---
     with tab_assoc:
         st.header("🧬 Scientific Association Analysis")
         c1, c2 = st.columns(2)
         with c1:
             analysis_level = st.radio("Analysis Level", ["ItemName", "Category"], horizontal=True)
         with c2:
-            min_support_slider = st.slider("Minimum Support (Frequency)", 0.001, 0.05, 0.005, format="%.3f")
+            # --- FIX: SLIDER FUNCTIONALITY IMPROVED ---
+            min_support_slider = st.slider("Minimum Support (Frequency)", 0.001, 1.0, 0.005, step=0.001, format="%.3f")
+            # ------------------------------------------
         
         with st.spinner("Running FP-Growth Algorithm..."):
             assoc_rules = run_advanced_association(df, level=analysis_level, min_sup=min_support_slider)
@@ -780,18 +791,26 @@ if uploaded_file:
         if not assoc_rules.empty:
             assoc_rules = assoc_rules.sort_values('lift', ascending=False).head(50)
             
+            # --- RESTORED: STRATEGIC STATUS LOGIC (WINNER/GEM) ---
             def get_status(row):
+                # Only applicable for Item Level
+                if analysis_level != 'ItemName':
+                    return "Category Level"
+                
+                # Check based on sorted pair match
                 current_pair = tuple(sorted([row['Antecedent'], row['Consequent']]))
+                
+                # Check against global lists generated earlier
                 if current_pair in proven_list: return "🔥 Proven Winner"
                 elif current_pair in potential_list: return "💎 Hidden Gem"
                 return "Normal"
 
+            assoc_rules['Status'] = assoc_rules.apply(get_status, axis=1)
+            
             if analysis_level == 'ItemName':
-                assoc_rules['Status'] = assoc_rules.apply(get_status, axis=1)
                 assoc_rules['Antecedent'] = assoc_rules['Antecedent'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
                 assoc_rules['Consequent'] = assoc_rules['Consequent'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
-            else:
-                assoc_rules['Status'] = "Category Level"
+            # -----------------------------------------------------
 
             st.dataframe(assoc_rules[['Status', 'Antecedent', 'Consequent', 'Support (%)', 'Total Item Qty', 'confidence', 'lift', 'zhang', 'conviction']], column_config={"Status": st.column_config.TextColumn("Strategic Status"), "Support (%)": st.column_config.NumberColumn("Support %", format="%.2f"), "Total Item Qty": st.column_config.TextColumn("Total Qty (Split)", width="medium"), "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"), "lift": st.column_config.NumberColumn("Lift", format="%.2f"), "conviction": st.column_config.NumberColumn("Conviction", format="%.2f")}, hide_index=True, use_container_width=True, height=600)
             
