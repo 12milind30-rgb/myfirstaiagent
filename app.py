@@ -474,6 +474,29 @@ if uploaded_file:
                     title_font=dict(size=16)
                 )
                 st.plotly_chart(fig_daily, use_container_width=True)
+            
+            # --- NEW ADDITION: WEEKLY SALES GRAPH ---
+            st.subheader("📅 Weekly Sales Performance")
+            if 'Date' in df.columns:
+                weekly_df = df.copy()
+                # Determine the start of the week (Monday) for each date
+                weekly_df['WeekStart'] = weekly_df['Date'] - pd.to_timedelta(weekly_df['Date'].dt.dayofweek, unit='D')
+                weekly_df['WeekEnd'] = weekly_df['WeekStart'] + pd.to_timedelta(6, unit='D')
+                
+                # Aggregate sales by week
+                weekly_stats = weekly_df.groupby(['WeekStart', 'WeekEnd'])['TotalAmount'].sum().reset_index()
+                weekly_stats = weekly_stats.sort_values('WeekStart')
+                
+                # Create labels for the x-axis
+                weekly_stats['Week Label'] = [
+                    f"Week {i+1} ({row['WeekStart'].strftime('%d %b')} - {row['WeekEnd'].strftime('%d %b')})"
+                    for i, row in weekly_stats.iterrows()
+                ]
+                
+                fig_weekly = px.bar(weekly_stats, x='Week Label', y='TotalAmount')
+                fig_weekly.update_xaxes(title=None)
+                st.plotly_chart(fig_weekly, use_container_width=True)
+            
             st.divider()
 
         def render_hourly_aggregated():
@@ -646,6 +669,29 @@ if uploaded_file:
         cat_data = df[df['Category'] == selected_cat_deep_dive]
         
         st.subheader(f"🔹 {selected_cat_deep_dive}")
+        
+        # --- NEW ADDITION: CATEGORY SUMMARY STATS ---
+        cat_stats_temp = cat_data.groupby('ItemName').agg({'TotalAmount': 'sum', 'Quantity': 'sum'}).reset_index()
+        total_items_count = len(cat_stats_temp)
+        
+        # Calculate Critical Items (**)
+        crit_df = cat_stats_temp[cat_stats_temp['TotalAmount'] < 500]
+        crit_count = len(crit_df)
+        crit_qty = crit_df['Quantity'].sum()
+        
+        # Calculate Warning Items (*)
+        warn_df = cat_stats_temp[(cat_stats_temp['TotalAmount'] >= 500) & (cat_stats_temp['TotalAmount'] < 1500)]
+        warn_count = len(warn_df)
+        warn_qty = warn_df['Quantity'].sum()
+        
+        # Calculate Star Items (★) - Pareto
+        star_df = cat_stats_temp[cat_stats_temp['ItemName'].isin(pareto_list)]
+        star_count = len(star_df)
+        star_qty = star_df['Quantity'].sum()
+        
+        # Display Summary
+        st.markdown(f"**Total Items:** {total_items_count} | **`**` Items:** {crit_count} (Qty: {int(crit_qty)}) | **`*` Items:** {warn_count} (Qty: {int(warn_qty)}) | **`★` Items:** {star_count} (Qty: {int(star_qty)})")
+        # --------------------------------------------
         
         cat_stats = cat_data.groupby('ItemName').agg({'TotalAmount': 'sum', 'Quantity': 'sum'}).reset_index()
         cat_stats['Contribution %'] = (cat_stats['TotalAmount'] / total_business_rev) * 100
