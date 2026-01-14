@@ -361,6 +361,18 @@ if uploaded_file:
     pareto_list = get_pareto_items(df)
     pareto_count = len(pareto_list)
     
+    # --- MOVED PRE-CALCULATIONS FOR GLOBAL USE ---
+    # Smart Combo data calculation (for Proven/Potential lists)
+    rules_df = get_combo_analysis_full(df)
+    proven_df, potential_df = get_part3_strategy(rules_df)
+    
+    # Lists for lookup
+    proven_list = []
+    potential_list = []
+    if not proven_df.empty: proven_list = proven_df['pair'].tolist()
+    if not potential_df.empty: potential_list = potential_df['pair'].tolist()
+    # ---------------------------------------------
+    
     # REQ 1: Added "Day wise Analysis" tab after Overview
     tab1, tab_day_wise, tab_cat, tab2, tab3, tab4, tab_assoc, tab5, tab6 = st.tabs([
         "Overview", "Day wise Analysis", "Category Details", "Pareto (Visual)", "Time Series", "Smart Combos", "Association Analysis", "Demand Forecast", "AI Chat"
@@ -729,12 +741,6 @@ if uploaded_file:
         st.header("🍔 Smart Combo Strategy")
         with st.expander("🛠️ Reorder Combo Layout"):
             combo_order = st.multiselect("Section Order", ["Part 1: Full Combo Map", "Part 3: Strategic Recommendations"], default=["Part 1: Full Combo Map", "Part 3: Strategic Recommendations"])
-        rules_df = get_combo_analysis_full(df)
-        proven_df, potential_df = get_part3_strategy(rules_df)
-        proven_list = []
-        potential_list = []
-        if not proven_df.empty: proven_list = proven_df['pair'].tolist()
-        if not potential_df.empty: potential_list = potential_df['pair'].tolist()
         
         def render_part1():
             st.subheader("1️⃣ Part 1: Full Category + Item Combo Map")
