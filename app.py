@@ -719,44 +719,33 @@ if uploaded_file:
             analysis_level = st.radio("Analysis Level", ["ItemName", "Category"], horizontal=True)
         
         # --- FIX: DYNAMIC SLIDER LOGIC ---
-        # 1. Create baskets once to find max support
         valid_df_global = df[df['Quantity'] > 0]
         basket_global = valid_df_global.groupby(['OrderID', analysis_level])['Quantity'].count().unstack().fillna(0)
         basket_sets_global = (basket_global > 0).astype(bool)
         
-        # 2. Run FP Growth strictly to get Supports
-        frequent_global = fpgrowth(basket_sets_global, min_support=0.001, use_colnames=True)
+        # Calculate supports manually to find max support accurately
+        supports = basket_sets_global.mean().sort_values(ascending=False)
+        max_sup = supports.max() if not supports.empty else 1.0
         
-        if not frequent_global.empty:
-            max_sup = frequent_global['support'].max()
-            # Safety cap at 1.0, minimum at 0.002
-            slider_max = float(min(1.0, max_sup + 0.01))
-            slider_min = 0.001
-            slider_default = max(slider_min, min(0.005, slider_max / 2)) # Heuristic default
-        else:
-            slider_max = 1.0
-            slider_min = 0.001
-            slider_default = 0.005
+        # Convert to percentage for slider display
+        max_sup_percent = float(min(100.0, max_sup * 100 + 1.0)) # Add buffer
+        default_val = min(0.5, max_sup_percent / 2) # Default to half of max
 
         with c2:
-            min_support_slider = st.slider("Minimum Support (Frequency)", slider_min, slider_max, slider_default, step=0.001, format="%.3f")
+            # Slider operates in Percentage (0-100), converted to float (0-1) for algo
+            min_support_percent = st.slider("Minimum Support (%)", 0.1, max_sup_percent, default_val, step=0.1, format="%.1f%%")
+            min_support_val = min_support_percent / 100.0
         # ------------------------------------------
         
-        with st.spinner("Running Association Rules..."):
-            # Filter the already computed frequent sets
-            filtered_frequent = frequent_global[frequent_global['support'] >= min_support_slider]
+        with st.spinner("Running FP-Growth Algorithm..."):
+            frequent_itemsets = fpgrowth(basket_sets_global, min_support=min_support_val, use_colnames=True)
             
-            if filtered_frequent.empty:
+            if frequent_itemsets.empty:
                 assoc_rules = pd.DataFrame()
             else:
-                assoc_rules = association_rules(filtered_frequent, metric="confidence", min_threshold=0.1)
+                assoc_rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=0.1)
                 
                 # --- APPLYING THE LOGIC FIXES FROM PREVIOUS STEPS ---
-                # 1. Total Item Qty Logic
-                # Need to reconstruct specific logic here since we ran fpgrowth outside function
-                # Or just call the function? calling the function is cleaner but repeats fpgrowth.
-                # Let's perform the cleaning logic here on 'assoc_rules'
-                
                 total_transactions_processed = len(basket_sets_global)
                 assoc_rules['No. of Orders'] = (assoc_rules['support'] * total_transactions_processed).round().astype(int)
                 assoc_rules['Support (%)'] = assoc_rules['support'] * 100
@@ -779,7 +768,6 @@ if uploaded_file:
                     assoc_rules = assoc_rules[assoc_rules['Antecedent'] != assoc_rules['Consequent']]
                 
                 # Calculate Split Quantity
-                # Need Quantity Basket
                 qty_basket_global = valid_df_global.groupby(['OrderID', analysis_level])['Quantity'].sum().unstack().fillna(0)
                 
                 def calculate_split_quantity(row):
