@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 10.2", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 10.5", layout="wide")
 
 # --- DATA PROCESSING ---
 @st.cache_data
@@ -105,7 +105,7 @@ def get_hourly_details(df):
 
 class HybridDemandForecaster:
     def __init__(self, seasonality_mode='multiplicative'):
-        # Changed daily_seasonality to False because we are feeding daily data, so intra-day seasonality doesn't exist
+        # Changed daily_seasonality to False because we are feeding daily data
         self.prophet_model = Prophet(seasonality_mode=seasonality_mode, yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
         try: self.prophet_model.add_country_holidays(country_name='IN')
         except: pass 
@@ -120,7 +120,6 @@ class HybridDemandForecaster:
 
     def create_features(self, df, is_future=False):
         df_feat = df.copy()
-        # df_feat['hour'] = df_feat['ds'].dt.hour # Removed: Input is Daily, Hour is irrelevant
         df_feat['dayofweek'] = df_feat['ds'].dt.dayofweek
         df_feat['quarter'] = df_feat['ds'].dt.quarter
         df_feat['month'] = df_feat['ds'].dt.month
@@ -128,10 +127,10 @@ class HybridDemandForecaster:
         
         # --- FIX: LOGIC ADAPTED FOR DAILY DATA (NOT HOURLY) ---
         if 'y' in df_feat.columns and not is_future:
-            df_feat['lag_1d'] = df_feat['y'].shift(1)  # Was 24 (wrong for daily)
-            df_feat['lag_7d'] = df_feat['y'].shift(7)  # Was 168 (wrong for daily)
-            df_feat['rolling_mean_3d'] = df_feat['y'].rolling(window=3).mean() # Was 72
-            df_feat['rolling_std_7d'] = df_feat['y'].rolling(window=7).std()   # Was 168
+            df_feat['lag_1d'] = df_feat['y'].shift(1)
+            df_feat['lag_7d'] = df_feat['y'].shift(7)
+            df_feat['rolling_mean_3d'] = df_feat['y'].rolling(window=3).mean()
+            df_feat['rolling_std_7d'] = df_feat['y'].rolling(window=7).std()
             
         df_feat = df_feat.fillna(0)
         return df_feat
@@ -171,8 +170,6 @@ class HybridDemandForecaster:
         future_prophet = self.prophet_model.make_future_dataframe(periods=periods, freq='D')
         forecast_prophet = self.prophet_model.predict(future_prophet)
         
-        # Re-create features for future (simplified for runtime stability)
-        # Note: True autoregressive features require a loop. Using Prophet dates for calendar features.
         future_dates = future_prophet.tail(periods).copy()
         extended_df = pd.concat([self.training_data_tail, future_dates], axis=0, ignore_index=True)
         extended_feat = self.create_features(extended_df, is_future=True)
@@ -196,48 +193,63 @@ class HybridDemandForecaster:
         result['RF_View'] = pred_rf
         return result
 
-# --- COMBO & ASSOCIATION LOGIC ---
+# --- COMBO & ASSOCIATION LOGIC (REFINED) ---
 
-def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
-    # 1. Create a Quantity Basket 
+def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1, min_orders=2):
+    # 1. Setup Basket
     valid_df = df[df['Quantity'] > 0]
-    qty_basket = valid_df.groupby(['OrderID', level])['Quantity'].sum().unstack().fillna(0)
     
-    # 2. Create Binary Basket for Algorithm (Strict 0/1)
-    # FIX: Using >0 ensures we count TRANSACTIONS, not Quantity Sums (prevents inflation)
+    # Group by Transaction to get the "Basket"
+    # We use 'count' to ensure binary existence check later, but sum() for quantity stats
+    qty_basket = valid_df.groupby(['OrderID', level])['Quantity'].sum().unstack(fill_value=0)
+    
+    # Boolean Basket for FP-Growth (0/1)
     basket_sets = (qty_basket > 0).astype(bool) 
     
+    # 2. Run FP-Growth
     frequent_itemsets = fpgrowth(basket_sets, min_support=min_sup, use_colnames=True)
     if frequent_itemsets.empty: return pd.DataFrame()
     
     rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_conf)
     
-    # 3. Clean columns
-    rules['Support (%)'] = rules['support'] * 100
+    # 3. Logic: Calculate "Times Sold Together" (Transaction Count)
+    # This is the critical fix for the "0.14% Support" noise.
+    def get_transaction_stats(row):
+        ant = list(row['antecedents'])[0]
+        con = list(row['consequents'])[0]
+        
+        # Find rows where BOTH are present
+        common_mask = (qty_basket[ant] > 0) & (qty_basket[con] > 0)
+        orders_count = common_mask.sum()
+        
+        # Sum quantities in those specific common orders
+        qty_ant = qty_basket.loc[common_mask, ant].sum()
+        qty_con = qty_basket.loc[common_mask, con].sum()
+        
+        return pd.Series([orders_count, qty_ant, qty_con])
+
+    stats = rules.apply(get_transaction_stats, axis=1)
+    rules['Times Sold Together'] = stats[0].astype(int)
+    rules['Qty A'] = stats[1].astype(int)
+    rules['Qty B'] = stats[2].astype(int)
+    
+    # 4. Filter by Minimum Orders (The Noise Killer)
+    rules = rules[rules['Times Sold Together'] >= min_orders]
+    
+    if rules.empty: return pd.DataFrame()
+
+    # 5. Clean & Format Output
+    rules['Support (%)'] = (rules['support'] * 100).round(2)
     rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
     rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
     
-    # Remove self-association for categories
+    # Self-reference check (Category level shouldn't match itself)
     if level == 'Category':
         rules = rules[rules['Antecedent'] != rules['Consequent']]
+        
+    rules['Total Qty (Split)'] = rules.apply(lambda x: f"{x['Qty A'] + x['Qty B']} ({x['Qty A']} + {x['Qty B']})", axis=1)
     
-    # 4. CUSTOM LOGIC: "Split number in form of Antecedent + Consequent"
-    def calculate_split_quantity(row):
-        ant = row['Antecedent']
-        con = row['Consequent']
-        
-        # Identify common orders
-        common_orders_mask = (qty_basket[ant] > 0) & (qty_basket[con] > 0)
-        
-        # Sum quantities separately
-        sum_ant = qty_basket.loc[common_orders_mask, ant].sum()
-        sum_con = qty_basket.loc[common_orders_mask, con].sum()
-        total = sum_ant + sum_con
-        
-        return f"{int(total)} ({int(sum_ant)} + {int(sum_con)})"
-
-    rules['Total Item Qty'] = rules.apply(calculate_split_quantity, axis=1)
-    
+    # Zhang's Metric
     def zhangs_metric(rule):
         sup = rule['support']
         sup_a = rule['antecedent support']
@@ -248,17 +260,17 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1):
         return numerator / denominator
 
     rules['zhang'] = rules.apply(zhangs_metric, axis=1)
-    rules = rules.sort_values('lift', ascending=False)
     
-    # Drop duplicates
+    # Deduplicate A->B and B->A (Keep the one with higher confidence or just first)
     rules['pair_key'] = rules.apply(lambda x: frozenset([x['Antecedent'], x['Consequent']]), axis=1)
     rules = rules.drop_duplicates(subset=['pair_key'])
     
-    return rules[['Antecedent', 'Consequent', 'Support (%)', 'Total Item Qty', 'confidence', 'lift', 'zhang', 'conviction']]
+    rules = rules.sort_values('Times Sold Together', ascending=False)
+    
+    return rules[['Antecedent', 'Consequent', 'Times Sold Together', 'Support (%)', 'Total Qty (Split)', 'confidence', 'lift', 'zhang']]
 
 def get_combo_analysis_full(df):
     valid_df = df[df['Quantity'] > 0]
-    # FIX: Count occurrence, convert to binary to prevent support inflation
     basket = valid_df.groupby(['OrderID', 'ItemName'])['Quantity'].count().unstack().fillna(0)
     basket_sets = (basket > 0).astype(int)
     
@@ -281,7 +293,6 @@ def get_combo_analysis_full(df):
     rules['Category B'] = rules['Item B'].map(item_cat_map)
     rules['Specific Item Combo'] = rules['Item A'] + " + " + rules['Item B']
     
-    # Recalculate exact Order Count based on support * total transactions
     total_transactions = len(basket_sets)
     rules['Times Sold Together'] = (rules['support'] * total_transactions).round().astype(int)
     
@@ -400,7 +411,7 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         st.plotly_chart(fig, use_container_width=True)
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 10.2")
+st.title("📊 Mithas Restaurant Intelligence 10.5")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
 
 if uploaded_file:
@@ -785,102 +796,85 @@ if uploaded_file:
         for block in combo_order:
             if block in combo_map: combo_map[block]()
     
-    # --- TAB 5: ASSOCIATION ANALYSIS ---
+    # --- TAB 5: ASSOCIATION ANALYSIS (OPTIMIZED) ---
     with tab_assoc:
         st.header("🧬 Scientific Association Analysis")
-        c1, c2 = st.columns(2)
+        st.markdown("Discover hidden patterns. **Note:** Rules are filtered to exclude 'One-Off' party orders.")
+        
+        c1, c2, c3 = st.columns(3)
         with c1:
             analysis_level = st.radio("Analysis Level", ["ItemName", "Category"], horizontal=True)
         
+        # --- PRE-CALCULATIONS FOR SLIDERS ---
         valid_df_global = df[df['Quantity'] > 0]
         basket_global = valid_df_global.groupby(['OrderID', analysis_level])['Quantity'].count().unstack().fillna(0)
         basket_sets_global = (basket_global > 0).astype(bool)
         
+        # Smart Defaults
         supports = basket_sets_global.mean().sort_values(ascending=False)
         max_sup = supports.max() if not supports.empty else 1.0
-        
         max_sup_percent = float(min(100.0, max_sup * 100 + 1.0)) 
-        default_val = min(0.5, max_sup_percent / 2)
-
+        
         with c2:
-            min_support_percent = st.slider("Minimum Support (%)", 0.01, max_sup_percent, default_val, step=0.01, format="%.2f%%")
+            # Min Support Slider
+            min_support_percent = st.slider("Minimum Support (%)", 0.01, max_sup_percent, 0.1, step=0.01, help="Percentage of total transactions the combo must appear in.")
             min_support_val = min_support_percent / 100.0
-        
-        with st.spinner("Running FP-Growth Algorithm..."):
-            frequent_itemsets = fpgrowth(basket_sets_global, min_support=min_support_val, use_colnames=True)
             
-            if frequent_itemsets.empty:
-                assoc_rules = pd.DataFrame()
+        with c3:
+            # NEW: Min Transactions Slider (The Noise Filter)
+            min_orders = st.slider("Min. Orders Together", 2, 50, 3, help="Remove rules that happened fewer than X times. Essential to remove one-off catering orders.")
+
+        st.divider()
+        
+        with st.spinner("Running Advanced Association Algorithm..."):
+            # Pass min_orders to the function
+            assoc_rules = run_advanced_association(df, level=analysis_level, min_sup=min_support_val, min_orders=min_orders)
+            
+            if not assoc_rules.empty:
+                # Add Status logic
+                def get_status(row):
+                    if analysis_level != 'ItemName': return "Category Level"
+                    current_pair = tuple(sorted([row['Antecedent'], row['Consequent']]))
+                    if current_pair in proven_list: return "🔥 Proven Winner"
+                    elif current_pair in potential_list: return "💎 Hidden Gem"
+                    return "Normal"
+
+                assoc_rules['Status'] = assoc_rules.apply(get_status, axis=1)
+                
+                # Apply Stars
+                if analysis_level == 'ItemName':
+                    assoc_rules['Antecedent'] = assoc_rules['Antecedent'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
+                    assoc_rules['Consequent'] = assoc_rules['Consequent'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
+
+                # DISPLAY
+                st.dataframe(
+                    assoc_rules,
+                    column_config={
+                        "Status": st.column_config.TextColumn("Strategic Status"),
+                        "Times Sold Together": st.column_config.NumberColumn("Orders Count", format="%d 🛒"),
+                        "Support (%)": st.column_config.NumberColumn("Support", format="%.2f%%"),
+                        "Total Qty (Split)": st.column_config.TextColumn("Total Qty (A + B)", width="medium"),
+                        "confidence": st.column_config.NumberColumn("Confidence", format="%.2f"),
+                        "lift": st.column_config.NumberColumn("Lift", format="%.2f"),
+                        "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f")
+                    },
+                    hide_index=True, 
+                    use_container_width=True, 
+                    height=600
+                )
+                
+                # Plot
+                fig = px.scatter(
+                    assoc_rules, x="Support (%)", y="confidence", 
+                    size="Times Sold Together", color="lift",
+                    hover_data=["Antecedent", "Consequent", "Total Qty (Split)"],
+                    title=f"Association Rules Landscape ({analysis_level} Level)",
+                    color_continuous_scale=px.colors.diverging.RdBu
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            
             else:
-                assoc_rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=0.1)
-                
-                # RE-APPLYING SAFE LOGIC (SAME AS ABOVE BUT LOCAL TO THIS TAB)
-                total_transactions_processed = len(basket_sets_global)
-                assoc_rules['No. of Orders'] = (assoc_rules['support'] * total_transactions_processed).round().astype(int)
-                assoc_rules['Support (%)'] = assoc_rules['support'] * 100
-                
-                def zhangs_metric(rule):
-                    sup = rule['support']
-                    sup_a = rule['antecedent support']
-                    sup_c = rule['consequent support']
-                    numerator = sup - (sup_a * sup_c)
-                    denominator = max(sup * (1 - sup_a), sup_a * (sup_c - sup))
-                    if denominator == 0: return 0
-                    return numerator / denominator
-
-                assoc_rules['zhang'] = assoc_rules.apply(zhangs_metric, axis=1)
-                assoc_rules['Antecedent'] = assoc_rules['antecedents'].apply(lambda x: list(x)[0])
-                assoc_rules['Consequent'] = assoc_rules['consequents'].apply(lambda x: list(x)[0])
-                
-                if analysis_level == 'Category':
-                    assoc_rules = assoc_rules[assoc_rules['Antecedent'] != assoc_rules['Consequent']]
-                
-                qty_basket_global = valid_df_global.groupby(['OrderID', analysis_level])['Quantity'].sum().unstack().fillna(0)
-                
-                def calculate_split_quantity(row):
-                    ant = row['Antecedent']
-                    con = row['Consequent']
-                    common_orders_mask = (qty_basket_global[ant] > 0) & (qty_basket_global[con] > 0)
-                    sum_ant = qty_basket_global.loc[common_orders_mask, ant].sum()
-                    sum_con = qty_basket_global.loc[common_orders_mask, con].sum()
-                    total = sum_ant + sum_con
-                    return f"{int(total)} ({int(sum_ant)} + {int(sum_con)})"
-
-                assoc_rules['Total Item Qty'] = assoc_rules.apply(calculate_split_quantity, axis=1)
-                
-                assoc_rules = assoc_rules.sort_values('lift', ascending=False)
-                assoc_rules['pair_key'] = assoc_rules.apply(lambda x: frozenset([x['Antecedent'], x['Consequent']]), axis=1)
-                assoc_rules = assoc_rules.drop_duplicates(subset=['pair_key'])
-        
-        if not assoc_rules.empty:
-            assoc_rules = assoc_rules.sort_values('lift', ascending=False)
-            
-            def get_status(row):
-                if analysis_level != 'ItemName':
-                    return "Category Level"
-                current_pair = tuple(sorted([row['Antecedent'], row['Consequent']]))
-                if current_pair in proven_list: return "🔥 Proven Winner"
-                elif current_pair in potential_list: return "💎 Hidden Gem"
-                return "Normal"
-
-            assoc_rules['Status'] = assoc_rules.apply(get_status, axis=1)
-            
-            if analysis_level == 'ItemName':
-                assoc_rules['Antecedent'] = assoc_rules['Antecedent'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
-                assoc_rules['Consequent'] = assoc_rules['Consequent'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
-
-            st.dataframe(assoc_rules[['Status', 'Antecedent', 'Consequent', 'Support (%)', 'Total Item Qty', 'confidence', 'lift', 'zhang', 'conviction']], column_config={"Status": st.column_config.TextColumn("Strategic Status"), "Support (%)": st.column_config.NumberColumn("Support %", format="%.2f"), "Total Item Qty": st.column_config.TextColumn("Total Qty (Split)", width="medium"), "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"), "lift": st.column_config.NumberColumn("Lift", format="%.2f"), "conviction": st.column_config.NumberColumn("Conviction", format="%.2f")}, hide_index=True, use_container_width=True, height=600)
-            
-            fig = px.scatter(
-                assoc_rules, x="Support (%)", y="confidence", 
-                size="lift", color="zhang",
-                hover_data=["Antecedent", "Consequent", "Total Item Qty"],
-                title=f"Association Rules Landscape ({analysis_level} Level)",
-                color_continuous_scale=px.colors.diverging.RdBu
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-        else: st.warning("No rules found.")
+                st.warning(f"No rules found with >{min_orders} orders together. Try lowering the filters.")
 
     # --- TAB 7: DEMAND FORECAST ---
     with tab5:
