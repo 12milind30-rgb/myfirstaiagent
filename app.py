@@ -25,28 +25,6 @@ warnings.filterwarnings('ignore')
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Mithas Intelligence 10.5", layout="wide")
 
-# --- FORCE DARK MODE VIA CSS ---
-# This ensures the dashboard is dark at all hours, regardless of system settings
-st.markdown("""
-<style>
-    [data-testid="stAppViewContainer"] {
-        background-color: #0E1117;
-        color: #FAFAFA;
-    }
-    [data-testid="stSidebar"] {
-        background-color: #262730;
-        color: #FAFAFA;
-    }
-    [data-testid="stHeader"] {
-        background-color: rgba(0,0,0,0);
-    }
-    div[data-baseweb="select"] > div {
-        background-color: #0E1117;
-        color: white;
-    }
-</style>
-""", unsafe_allow_html=True)
-
 # --- DATA PROCESSING ---
 @st.cache_data
 def load_data(file):
@@ -416,8 +394,7 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         daily = subset.groupby(['Date', 'ItemName'])['Quantity'].sum().reset_index()
         if daily.empty: continue
         daily['Legend Name'] = daily['ItemName'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
-        # --- UPDATED: Added plotly_dark template ---
-        fig = px.line(daily, x='Date', y='Quantity', color='Legend Name', markers=True, template="plotly_dark")
+        fig = px.line(daily, x='Date', y='Quantity', color='Legend Name', markers=True)
         
         for item in top_items:
             avg_val = daily[daily['ItemName'] == item]['Quantity'].mean()
@@ -479,8 +456,7 @@ if uploaded_file:
                 st.subheader("⌚ Peak Hours Graph")
                 if 'Hour' in df.columns:
                     hourly = df.groupby('Hour')['TotalAmount'].sum().reset_index()
-                    # --- UPDATED: Added plotly_dark template ---
-                    fig_hourly = px.bar(hourly, x='Hour', y='TotalAmount', template="plotly_dark")
+                    fig_hourly = px.bar(hourly, x='Hour', y='TotalAmount')
                     avg_hourly = hourly['TotalAmount'].mean()
                     fig_hourly.add_hline(y=avg_hourly, line_dash="dash", line_color="red", 
                                          annotation_text=f"Avg: ₹{avg_hourly:,.0f}", annotation_position="top right")
@@ -490,8 +466,7 @@ if uploaded_file:
                 st.subheader("📅 Peak Days Graph")
                 daily_peak = df.groupby('DayOfWeek')['TotalAmount'].sum().reindex(
                     ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']).reset_index()
-                # --- UPDATED: Added plotly_dark template ---
-                fig_daily = px.bar(daily_peak, x='DayOfWeek', y='TotalAmount', template="plotly_dark")
+                fig_daily = px.bar(daily_peak, x='DayOfWeek', y='TotalAmount')
                 
                 # --- UPDATED: REMOVED BOLD (Arial Black) AND EXPLICIT BLACK COLOR ---
                 fig_daily.update_xaxes(
@@ -534,8 +509,7 @@ if uploaded_file:
         def render_contributions():
             cat_cont = get_contribution_lists(df)
             st.subheader("📂 Category Contribution")
-            # --- UPDATED: Added plotly_dark template ---
-            fig_pie = px.pie(cat_cont, values='TotalAmount', names='Category', hole=0.3, template="plotly_dark")
+            fig_pie = px.pie(cat_cont, values='TotalAmount', names='Category', hole=0.3)
             st.plotly_chart(fig_pie, use_container_width=True)
             st.divider()
 
@@ -630,7 +604,6 @@ if uploaded_file:
         ).reset_index()
         daily_aov_stats.rename(columns={'Date': 'Day'}, inplace=True)
         
-        # --- UPDATED: Added plotly_dark template ---
         fig_upsell = px.bar(
             daily_aov_stats,
             x='Day',
@@ -639,8 +612,7 @@ if uploaded_file:
             color='Percentage Below AOV',
             color_continuous_scale='RdYlGn_r', 
             labels={'Percentage Below AOV': '% Low Value Orders'},
-            hover_data=['Total Orders', 'Below AOV'],
-            template="plotly_dark"
+            hover_data=['Total Orders', 'Below AOV']
         )
         
         fig_upsell.add_hline(
@@ -896,14 +868,12 @@ if uploaded_file:
                 )
                 
                 # Plot
-                # --- UPDATED: Added plotly_dark template ---
                 fig = px.scatter(
                     assoc_rules, x="Support (%)", y="confidence", 
                     size="Times Sold Together", color="lift",
                     hover_data=["Antecedent", "Consequent", "Total Qty (Split)"],
                     title=f"Association Rules Landscape ({analysis_level} Level)",
-                    color_continuous_scale=px.colors.diverging.RdBu,
-                    template="plotly_dark"
+                    color_continuous_scale=px.colors.diverging.RdBu
                 )
                 st.plotly_chart(fig, use_container_width=True)
             
@@ -951,12 +921,11 @@ if uploaded_file:
                             fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['Prophet_View'], mode='lines', name='Prophet View', line=dict(dash='dot', color='blue', width=1), visible='legendonly'))
                             fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['XGB_View'], mode='lines', name='XGBoost View', line=dict(dash='dot', color='red', width=1), visible='legendonly'))
                             
-                            # --- UPDATED: Added plotly_dark template ---
                             fig.update_layout(
                                 title="30-Day Demand Forecast", 
                                 xaxis_title="Date", 
                                 yaxis_title="Predicted Quantity", 
-                                template="plotly_dark"
+                                template="plotly_white"
                             )
                             st.plotly_chart(fig, use_container_width=True)
                             
