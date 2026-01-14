@@ -3,8 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-import seaborn as sns
-import matplotlib.pyplot as plt
+import networkx as nx
 from mlxtend.frequent_patterns import fpgrowth, apriori, association_rules
 from mlxtend.preprocessing import TransactionEncoder
 from langchain_openai import ChatOpenAI
@@ -12,6 +11,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from datetime import timedelta
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import warnings
+import io
 
 # --- NEW IMPORTS FOR HYBRID MODEL ---
 from prophet import Prophet
@@ -23,35 +23,53 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 10.2", layout="wide")
+st.set_page_config(page_title="Mithas Intelligence 10.3", layout="wide", page_icon="🍬")
 
-# --- DATA PROCESSING ---
+# --- DATA PROCESSING (ENHANCED ROBUSTNESS) ---
 @st.cache_data
 def load_data(file):
-    df = pd.read_excel(file)
+    try:
+        df = pd.read_excel(file)
+    except Exception as e:
+        st.error(f"Error reading Excel file: {e}")
+        return pd.DataFrame()
+
     col_map = {
         'Invoice No.': 'OrderID', 'Item Name': 'ItemName', 'Qty.': 'Quantity',
         'Final Total': 'TotalAmount', 'Price': 'UnitPrice', 'Category': 'Category',
         'Timestamp': 'Time', 'Date': 'Date'
     }
     df = df.rename(columns=col_map)
+    
+    # Numeric conversion robustness
     for c in ['Quantity', 'TotalAmount', 'UnitPrice']:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+            
+    # Date parsing robustness
     if 'Date' in df.columns:
-        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        # Try standard format first, fall back to mixed
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce', dayfirst=True)
+        # Drop rows where Date failed to parse
+        if df['Date'].isnull().any():
+            st.warning(f"⚠️ {df['Date'].isnull().sum()} rows had invalid dates and were excluded.")
+            df = df.dropna(subset=['Date'])
+            
         df['DayOfWeek'] = df['Date'].dt.day_name()
     
     if 'Time' in df.columns:
         try:
+            # Try parsing as full datetime first
             df['Hour'] = pd.to_datetime(df['Time'].astype(str), format='%H:%M:%S', errors='coerce').dt.hour
+            # Fallback if just string
             if df['Hour'].isnull().all():
                  df['Hour'] = pd.to_datetime(df['Time'], errors='coerce').dt.hour
         except:
             df['Hour'] = 0
+            
     return df
 
-# --- HELPER FUNCTIONS ---
+# --- HELPER FUNCTIONS (PRESERVED) ---
 
 def get_pareto_items(df):
     item_rev = df.groupby('ItemName')['TotalAmount'].sum().sort_values(ascending=False).reset_index()
@@ -153,6 +171,16 @@ class HybridDemandForecaster:
         result['XGB_View'] = pred_xgb
         result['RF_View'] = pred_rf
         return result
+
+# --- CACHED TRAINING FUNCTION (PERFORMANCE OPTIMIZATION) ---
+@st.cache_resource(show_spinner="Training AI Brain (This may take a moment)...")
+def train_hybrid_model(df_train):
+    """
+    Wrapper to cache the heavy model training.
+    """
+    forecaster = HybridDemandForecaster()
+    forecaster.fit(df_train)
+    return forecaster
 
 # --- COMBO & ASSOCIATION LOGIC ---
 
@@ -262,16 +290,49 @@ def get_part3_strategy(rules_df):
     potential = potential[potential['lift'] > 1.5].sort_values('lift', ascending=False).head(10).copy()
     return proven, potential
 
-# --- ANALYTICS MODULES (EXISTING) ---
-def get_overview_metrics(df):
+# --- ANALYTICS MODULES (UI ENHANCED) ---
+def get_overview_metrics_with_deltas(df):
+    # Sort by date
+    df_sorted = df.sort_values('Date')
+    
+    # Split into "Current" (Last 30 days of data) and "Previous" (30 days before that)
+    last_date = df_sorted['Date'].max()
+    cutoff_current = last_date - timedelta(days=30)
+    cutoff_prev = cutoff_current - timedelta(days=30)
+    
+    df_curr = df_sorted[df_sorted['Date'] > cutoff_current]
+    df_prev = df_sorted[(df_sorted['Date'] <= cutoff_current) & (df_sorted['Date'] > cutoff_prev)]
+    
+    # Calculate Metrics
+    def calc_stats(d):
+        if d.empty: return 0, 0, 0
+        rev = d['TotalAmount'].sum()
+        orders = d['OrderID'].nunique()
+        aov = rev / orders if orders > 0 else 0
+        return rev, orders, aov
+
+    curr_rev, curr_ord, curr_aov = calc_stats(df_curr)
+    prev_rev, prev_ord, prev_aov = calc_stats(df_prev)
+    
+    # Global totals for display (not just last 30 days)
     total_rev = df['TotalAmount'].sum()
     total_orders = df['OrderID'].nunique()
     num_days = df['Date'].nunique()
     avg_rev_day = total_rev / num_days if num_days > 0 else 0
     num_weeks = max(1, num_days / 7)
     avg_rev_week = total_rev / num_weeks
-    aov = total_rev / total_orders if total_orders > 0 else 0
-    return total_rev, total_orders, avg_rev_day, avg_rev_week, aov
+    global_aov = total_rev / total_orders if total_orders > 0 else 0
+    
+    # Calculate Deltas
+    def get_delta(curr, prev):
+        if prev == 0: return 0.0
+        return ((curr - prev) / prev) * 100
+
+    delta_rev = get_delta(curr_rev, prev_rev)
+    delta_ord = get_delta(curr_ord, prev_ord)
+    delta_aov = get_delta(curr_aov, prev_aov)
+    
+    return total_rev, total_orders, avg_rev_day, avg_rev_week, global_aov, delta_rev, delta_ord, delta_aov
 
 def get_star_items_with_hours(df, limit_n):
     total_rev = df['TotalAmount'].sum()
@@ -352,12 +413,93 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         fig.update_yaxes(matches=None, showticklabels=True)
         st.plotly_chart(fig, use_container_width=True)
 
+# --- NETWORK GRAPH HELPER ---
+def render_network_graph(rules_df):
+    if rules_df.empty: return
+    
+    # Create Graph
+    G = nx.DiGraph()
+    
+    for _, row in rules_df.iterrows():
+        ant = row['Antecedent']
+        con = row['Consequent']
+        lift = row['lift']
+        # Add Edge
+        G.add_edge(ant, con, weight=lift)
+
+    # Layout
+    pos = nx.spring_layout(G, k=0.5, iterations=50)
+
+    # Create Edges Trace
+    edge_x = []
+    edge_y = []
+    for edge in G.edges():
+        x0, y0 = pos[edge[0]]
+        x1, y1 = pos[edge[1]]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+
+    edge_trace = go.Scatter(
+        x=edge_x, y=edge_y,
+        line=dict(width=0.5, color='#888'),
+        hoverinfo='none',
+        mode='lines')
+
+    # Create Nodes Trace
+    node_x = []
+    node_y = []
+    node_text = []
+    node_adjacencies = []
+    
+    for node in G.nodes():
+        x, y = pos[node]
+        node_x.append(x)
+        node_y.append(y)
+        node_text.append(str(node))
+        node_adjacencies.append(len(G.adj[node]))
+
+    node_trace = go.Scatter(
+        x=node_x, y=node_y,
+        mode='markers+text',
+        hoverinfo='text',
+        text=node_text,
+        textposition="top center",
+        marker=dict(
+            showscale=True,
+            colorscale='YlGnBu',
+            size=15,
+            color=node_adjacencies,
+            colorbar=dict(
+                thickness=15,
+                title='Connections',
+                xanchor='left',
+                titleside='right'
+            ),
+            line_width=2))
+
+    fig = go.Figure(data=[edge_trace, node_trace],
+                 layout=go.Layout(
+                    title='🔗 Product Interaction Network (Clusters = Frequent Combos)',
+                    titlefont_size=16,
+                    showlegend=False,
+                    hovermode='closest',
+                    margin=dict(b=20,l=5,r=5,t=40),
+                    xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                    yaxis=dict(showgrid=False, zeroline=False, showticklabels=False))
+                    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 10.2")
+st.title("📊 Mithas Restaurant Intelligence 10.3")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
 
 if uploaded_file:
     df = load_data(uploaded_file)
+    
+    if df.empty:
+        st.stop()
+
     pareto_list = get_pareto_items(df)
     pareto_count = len(pareto_list)
     
@@ -376,7 +518,7 @@ if uploaded_file:
         "Overview", "Day wise Analysis", "Category Details", "Pareto (Visual)", "Time Series", "Smart Combos", "Association Analysis", "Demand Forecast", "AI Chat"
     ])
 
-    # --- TAB 1: OVERVIEW ---
+    # --- TAB 1: OVERVIEW (METRIC DELTAS) ---
     with tab1:
         st.header("🏢 Business Overview")
         with st.expander("🛠️ Reorder Page Layout", expanded=False):
@@ -387,13 +529,16 @@ if uploaded_file:
             )
 
         def render_metrics():
-            rev, orders, avg_day, avg_week, aov = get_overview_metrics(df)
+            # UPDATED: Now returns deltas
+            rev, orders, avg_day, avg_week, aov, d_rev, d_ord, d_aov = get_overview_metrics_with_deltas(df)
+            
             c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("💰 Total Revenue", f"₹{rev:,.0f}")
-            c2.metric("🧾 Total Orders", orders)
+            c1.metric("💰 Total Revenue", f"₹{rev:,.0f}", delta=f"{d_rev:.1f}% (30d)")
+            c2.metric("🧾 Total Orders", orders, delta=f"{d_ord:.1f}% (30d)")
             c3.metric("📅 Avg Rev/Day", f"₹{avg_day:,.0f}")
             c4.metric("🗓️ Avg Rev/Week", f"₹{avg_week:,.0f}")
-            c5.metric("💳 Avg Order Value", f"₹{aov:.0f}")
+            c5.metric("💳 Avg Order Value", f"₹{aov:.0f}", delta=f"{d_aov:.1f}% (30d)")
+            st.caption("Delta values compare the last 30 days vs the previous 30 days in your dataset.")
             st.divider()
 
         def render_graphs():
@@ -477,7 +622,7 @@ if uploaded_file:
         for block_name in overview_order:
             if block_name in block_map: block_map[block_name]()
 
-    # --- TAB: DAY WISE ANALYSIS (NEW) ---
+    # --- TAB: DAY WISE ANALYSIS (WITH DOWNLOAD) ---
     with tab_day_wise:
         st.header("📅 Day-wise Deep Dive")
         
@@ -523,9 +668,6 @@ if uploaded_file:
             candidate_items = item_sums[item_sums < 3].index.tolist()
             
             # --- CRITICAL FIX: FILTER FOR ITEMS SOLD *ON THIS SPECIFIC DAY* ---
-            # We only show the item on Day D if it had > 0 sales on Day D.
-            # This prevents items sold on Sunday appearing on Saturday's list.
-            
             day_specific_df = df[df['DayOfWeek'] == d]
             if selected_nw_category != "All Categories":
                 day_specific_df = day_specific_df[day_specific_df['Category'] == selected_nw_category]
@@ -552,6 +694,18 @@ if uploaded_file:
         
         waste_df = pd.DataFrame(not_worth_dict)
         st.dataframe(waste_df, use_container_width=True, height=500)
+        
+        # --- DOWNLOAD BUTTON FOR WASTE REPORT ---
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            waste_df.to_excel(writer, sheet_name='Low_Volume_Items', index=False)
+        
+        st.download_button(
+            label="📥 Download This Report",
+            data=buffer,
+            file_name="Mithas_Low_Volume_Items.xlsx",
+            mime="application/vnd.ms-excel"
+        )
 
         # 3. NEW FEATURE: ORDERS BELOW AOV GRAPH
         st.markdown("---")
@@ -783,7 +937,7 @@ if uploaded_file:
         for block in combo_order:
             if block in combo_map: combo_map[block]()
     
-    # --- TAB 5: ASSOCIATION ANALYSIS (FIXED SLIDER & STATUS) ---
+    # --- TAB 5: ASSOCIATION ANALYSIS (WITH NETWORK GRAPH) ---
     with tab_assoc:
         st.header("🧬 Scientific Association Analysis")
         c1, c2 = st.columns(2)
@@ -881,6 +1035,11 @@ if uploaded_file:
                 assoc_rules['Consequent'] = assoc_rules['Consequent'].apply(lambda x: f"★ {x}" if x in pareto_list else x)
             # -----------------------------------------------------
 
+            # RENDER NEW NETWORK GRAPH
+            st.subheader("🕸️ Interactive Network Graph")
+            render_network_graph(assoc_rules.head(50)) # Limit to top 50 rules for clarity
+            st.divider()
+
             st.dataframe(assoc_rules[['Status', 'Antecedent', 'Consequent', 'Support (%)', 'Total Item Qty', 'confidence', 'lift', 'zhang', 'conviction']], column_config={"Status": st.column_config.TextColumn("Strategic Status"), "Support (%)": st.column_config.NumberColumn("Support %", format="%.2f"), "Total Item Qty": st.column_config.TextColumn("Total Qty (Split)", width="medium"), "zhang": st.column_config.NumberColumn("Zhang's Metric", format="%.2f"), "lift": st.column_config.NumberColumn("Lift", format="%.2f"), "conviction": st.column_config.NumberColumn("Conviction", format="%.2f")}, hide_index=True, use_container_width=True, height=600)
             
             fig = px.scatter(
@@ -894,7 +1053,7 @@ if uploaded_file:
             
         else: st.warning("No rules found.")
 
-    # --- TAB 7: DEMAND FORECAST (WITH SPECIFIC UPLOADER) ---
+    # --- TAB 7: DEMAND FORECAST (WITH SPECIFIC UPLOADER & CACHING) ---
     with tab5:
         st.header("🔮 Demand Prediction (Ensemble AI)")
         st.markdown("**Model:** Hybrid Ensemble (Prophet + XGBoost + Random Forest + Meta-Learner).")
@@ -915,38 +1074,38 @@ if uploaded_file:
             selected_item = st.selectbox("Select Item to Forecast", all_items)
             
             if st.button("Generate AI Forecast"):
-                with st.spinner(f"Training AI Models for {selected_item}..."):
-                    item_df = df_to_use[df_to_use['ItemName'] == selected_item].groupby('Date')['Quantity'].sum().reset_index()
-                    item_df.columns = ['ds', 'y'] # Prophet format
-                    
-                    if len(item_df) < 14:
-                        st.error(f"⚠️ Not enough history for {selected_item} (Need 14+ days). Model cannot train.")
-                    else:
-                        try:
-                            forecaster = HybridDemandForecaster()
-                            forecaster.fit(item_df)
-                            forecast = forecaster.predict(periods=30)
-                            
-                            st.subheader(f"Forecast for {selected_item}")
-                            
-                            fig = go.Figure()
-                            fig.add_trace(go.Scatter(x=item_df['ds'], y=item_df['y'], mode='markers', name='Actual Sales', marker=dict(color='gray', opacity=0.5, size=8)))
-                            fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['Predicted_Demand'], mode='lines+markers', name='Ensemble Prediction', line=dict(color='#00CC96', width=3)))
-                            fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['Prophet_View'], mode='lines', name='Prophet View', line=dict(dash='dot', color='blue', width=1), visible='legendonly'))
-                            fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['XGB_View'], mode='lines', name='XGBoost View', line=dict(dash='dot', color='red', width=1), visible='legendonly'))
-                            
-                            fig.update_layout(title="30-Day Demand Forecast", xaxis_title="Date", yaxis_title="Predicted Quantity", template="plotly_white")
-                            st.plotly_chart(fig, use_container_width=True)
-                            
-                            st.markdown("#### Detailed Forecast Data")
-                            st.dataframe(forecast[['ds', 'Predicted_Demand', 'Prophet_View', 'XGB_View']], hide_index=True, use_container_width=True)
-                            
-                        except Exception as e:
-                            st.error(f"Modeling Error: {e}")
+                # Data Prep
+                item_df = df_to_use[df_to_use['ItemName'] == selected_item].groupby('Date')['Quantity'].sum().reset_index()
+                item_df.columns = ['ds', 'y'] # Prophet format
+                
+                if len(item_df) < 14:
+                    st.error(f"⚠️ Not enough history for {selected_item} (Need 14+ days). Model cannot train.")
+                else:
+                    try:
+                        # CALLING THE CACHED FUNCTION
+                        forecaster = train_hybrid_model(item_df)
+                        forecast = forecaster.predict(periods=30)
+                        
+                        st.subheader(f"Forecast for {selected_item}")
+                        
+                        fig = go.Figure()
+                        fig.add_trace(go.Scatter(x=item_df['ds'], y=item_df['y'], mode='markers', name='Actual Sales', marker=dict(color='gray', opacity=0.5, size=8)))
+                        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['Predicted_Demand'], mode='lines+markers', name='Ensemble Prediction', line=dict(color='#00CC96', width=3)))
+                        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['Prophet_View'], mode='lines', name='Prophet View', line=dict(dash='dot', color='blue', width=1), visible='legendonly'))
+                        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['XGB_View'], mode='lines', name='XGBoost View', line=dict(dash='dot', color='red', width=1), visible='legendonly'))
+                        
+                        fig.update_layout(title="30-Day Demand Forecast", xaxis_title="Date", yaxis_title="Predicted Quantity", template="plotly_white")
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        st.markdown("#### Detailed Forecast Data")
+                        st.dataframe(forecast[['ds', 'Predicted_Demand', 'Prophet_View', 'XGB_View']], hide_index=True, use_container_width=True)
+                        
+                    except Exception as e:
+                        st.error(f"Modeling Error: {e}")
         else:
             st.info("Please upload data to begin forecasting.")
 
-    # --- TAB 8: AI CHAT (UNCHANGED) ---
+    # --- TAB 8: AI CHAT (CONTEXT AWARE) ---
     with tab6:
         st.subheader("🤖 Manager Chat")
         if "messages" not in st.session_state: st.session_state.messages = []
@@ -955,8 +1114,18 @@ if uploaded_file:
             st.chat_message("user").write(prompt)
             st.session_state.messages.append({"role": "user", "content": prompt})
             try:
+                # --- ENHANCED SYSTEM PROMPT ---
+                top_items_context = ", ".join(pareto_list[:10])
+                total_rev_context = df['TotalAmount'].sum()
+                sys_msg = f"""You are the Mithas Restaurant Analyst. 
+                Context:
+                - Total Revenue: {total_rev_context}
+                - Top Items (Pareto): {top_items_context}
+                Answer strictly based on restaurant analytics."""
+                # ------------------------------
+                
                 llm = ChatOpenAI(model="gpt-4o-mini", api_key=st.secrets["OPENAI_API_KEY"])
-                response = llm.invoke([SystemMessage(content="Restaurant Analyst"), HumanMessage(content=prompt)])
+                response = llm.invoke([SystemMessage(content=sys_msg), HumanMessage(content=prompt)])
                 st.chat_message("assistant").write(response.content)
                 st.session_state.messages.append({"role": "assistant", "content": response.content})
             except: st.error("Check API Key")
