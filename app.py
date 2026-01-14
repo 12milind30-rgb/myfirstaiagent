@@ -23,7 +23,7 @@ from sklearn.preprocessing import StandardScaler
 warnings.filterwarnings('ignore')
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Mithas Intelligence 10.3", layout="wide", page_icon="🍬")
+st.set_page_config(page_title="Mithas Intelligence 10.4", layout="wide", page_icon="🍬")
 
 # --- DATA PROCESSING (ENHANCED ROBUSTNESS) ---
 @st.cache_data
@@ -413,7 +413,7 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         fig.update_yaxes(matches=None, showticklabels=True)
         st.plotly_chart(fig, use_container_width=True)
 
-# --- NETWORK GRAPH HELPER ---
+# --- NETWORK GRAPH HELPER (FIXED) ---
 def render_network_graph(rules_df):
     if rules_df.empty: return
     
@@ -475,7 +475,7 @@ def render_network_graph(rules_df):
                 xanchor='left',
                 titleside='right'
             ),
-            line_width=2))
+            line=dict(width=2))) # <--- FIXED THIS LINE (Removed 'line_width')
 
     fig = go.Figure(data=[edge_trace, node_trace],
                  layout=go.Layout(
@@ -491,7 +491,7 @@ def render_network_graph(rules_df):
 
 
 # --- MAIN APP LAYOUT ---
-st.title("📊 Mithas Restaurant Intelligence 10.3")
+st.title("📊 Mithas Restaurant Intelligence 10.4")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
 
 if uploaded_file:

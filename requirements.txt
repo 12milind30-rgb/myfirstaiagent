@@ -2,8 +2,7 @@ streamlit
 pandas
 numpy
 plotly
-seaborn
-matplotlib
+networkx
 mlxtend
 langchain-openai
 langchain-core
@@ -11,6 +10,5 @@ statsmodels
 prophet
 xgboost
 scikit-learn
-networkx
 xlsxwriter
 openpyxl
