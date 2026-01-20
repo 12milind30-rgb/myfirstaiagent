@@ -728,7 +728,10 @@ if uploaded_file:
             col_config[day] = st.column_config.NumberColumn(f"{day} ({int(day_sum)})", format="%d")
         
         cols_to_show = ['Item Name', 'TotalAmount', 'Quantity', 'Contribution %'] + days_order
-        st.dataframe(cat_stats[cols_to_show], column_config=col_config, hide_index=True, use_container_width=True)
+        
+        # --- FIX: Apply row-wise heatmap for the 7 days ---
+        cat_styler = cat_stats[cols_to_show].style.background_gradient(subset=days_order, axis=1, cmap="YlOrRd")
+        st.dataframe(cat_styler, column_config=col_config, hide_index=True, use_container_width=True)
         
         st.caption("📝 **Legend:** `**` = Revenue < ₹500 (Critical) | `*` = Revenue < ₹1500 (Warning) | `★` = Pareto Top 80% Item")
         st.divider()
@@ -778,7 +781,11 @@ if uploaded_file:
                 pivot_mat['3-Day Qty'] = pivot_mat['3-Day Qty'].astype(int)
                 pivot_mat = pivot_mat.sort_values('Total Quantity', ascending=False)
                 pivot_mat.index = pivot_mat.index.map(lambda x: f"★ {x}" if x in pareto_list else x)
-                st.dataframe(pivot_mat, use_container_width=True, height=600)
+                
+                # --- FIX: Apply row-wise heatmap for the hourly columns only ---
+                hour_cols = [c for c in pivot_mat.columns if c not in ['Total Quantity', '3-Day Qty']]
+                mat_styler = pivot_mat.style.background_gradient(subset=hour_cols, axis=1, cmap="YlOrRd")
+                st.dataframe(mat_styler, use_container_width=True, height=600)
             else:
                 st.warning(f"No sales found for category '{selected_cat_deep_dive}' on this selection.")
         else:
