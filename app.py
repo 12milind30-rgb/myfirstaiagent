@@ -702,6 +702,10 @@ if uploaded_file:
         day_pivot = day_pivot[days_order] 
         
         cat_stats = pd.merge(cat_stats, day_pivot, on='ItemName', how='left').fillna(0)
+        
+        # --- FIX: Force Quantity to be integer ---
+        cat_stats['Quantity'] = cat_stats['Quantity'].astype(int)
+        
         cat_stats = cat_stats.sort_values('TotalAmount', ascending=False)
         
         def mark_item_name(row):
@@ -720,7 +724,8 @@ if uploaded_file:
         col_config = {
             "TotalAmount": st.column_config.NumberColumn("Revenue", format="₹%d"),
             "Contribution %": st.column_config.ProgressColumn("Contribution", format="%.2f%%"),
-            "Quantity": st.column_config.NumberColumn("Total Qty")
+            # --- FIX: Added format="%d" to ensure clean integer display for Total Qty ---
+            "Quantity": st.column_config.NumberColumn("Total Qty", format="%d")
         }
         for day in days_order:
             # --- MODIFIED: Calculate total for the specific day and add to header ---
