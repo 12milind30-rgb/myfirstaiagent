@@ -782,9 +782,14 @@ if uploaded_file:
                 pivot_mat = pivot_mat.sort_values('Total Quantity', ascending=False)
                 pivot_mat.index = pivot_mat.index.map(lambda x: f"★ {x}" if x in pareto_list else x)
                 
+                # --- FIX: Ensure integers to avoid "22.000000" display issues ---
+                pivot_mat = pivot_mat.astype(int)
+                
                 # --- FIX: Apply row-wise heatmap for the hourly columns only ---
                 hour_cols = [c for c in pivot_mat.columns if c not in ['Total Quantity', '3-Day Qty']]
-                mat_styler = pivot_mat.style.background_gradient(subset=hour_cols, axis=1, cmap="YlOrRd")
+                
+                # Added .format() to ensure clean number display
+                mat_styler = pivot_mat.style.format("{:.0f}").background_gradient(subset=hour_cols, axis=1, cmap="YlOrRd")
                 st.dataframe(mat_styler, use_container_width=True, height=600)
             else:
                 st.warning(f"No sales found for category '{selected_cat_deep_dive}' on this selection.")
