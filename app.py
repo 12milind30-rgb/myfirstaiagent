@@ -723,7 +723,9 @@ if uploaded_file:
             "Quantity": st.column_config.NumberColumn("Total Qty")
         }
         for day in days_order:
-            col_config[day] = st.column_config.NumberColumn(day, format="%d")
+            # --- MODIFIED: Calculate total for the specific day and add to header ---
+            day_sum = day_pivot[day].sum()
+            col_config[day] = st.column_config.NumberColumn(f"{day} ({int(day_sum)})", format="%d")
         
         cols_to_show = ['Item Name', 'TotalAmount', 'Quantity', 'Contribution %'] + days_order
         st.dataframe(cat_stats[cols_to_show], column_config=col_config, hide_index=True, use_container_width=True)
