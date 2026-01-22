@@ -129,7 +129,8 @@ class HybridDemandForecaster:
         df_feat['is_weekend'] = df_feat['dayofweek'].apply(lambda x: 1 if x >= 5 else 0)
         
         # --- FIX: LOGIC ADAPTED FOR DAILY DATA (NOT HOURLY) ---
-        if 'y' in df_feat.columns and not is_future:
+        # --- FIX 2: Removed "and not is_future" to ensure columns are created during prediction ---
+        if 'y' in df_feat.columns:
             df_feat['lag_1d'] = df_feat['y'].shift(1)
             df_feat['lag_7d'] = df_feat['y'].shift(7)
             df_feat['rolling_mean_3d'] = df_feat['y'].rolling(window=3).mean()
