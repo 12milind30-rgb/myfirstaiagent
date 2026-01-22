@@ -109,7 +109,10 @@ class HybridDemandForecaster:
         self.prophet_model = Prophet(seasonality_mode=seasonality_mode, yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
         try: self.prophet_model.add_country_holidays(country_name='IN')
         except: pass 
-        self.xgb_model = XGBRegressor(n_estimators=1000, learning_rate=0.05, max_depth=6, early_stopping_rounds=50, n_jobs=-1, objective='reg:squarederror')
+        
+        # --- FIX: REMOVED early_stopping_rounds=50 TO FIX VALIDATION DATASET ERROR ---
+        self.xgb_model = XGBRegressor(n_estimators=1000, learning_rate=0.05, max_depth=6, n_jobs=-1, objective='reg:squarederror')
+        
         self.rf_model = RandomForestRegressor(n_estimators=200, max_depth=10, n_jobs=-1, random_state=42)
         self.meta_model = Ridge(alpha=1.0)
         self.scaler = StandardScaler()
@@ -668,7 +671,10 @@ if uploaded_file:
         
         cat_data = df[df['Category'] == selected_cat_deep_dive]
         
-        st.subheader(f"🔹 {selected_cat_deep_dive}")
+        # --- NEW: Added Revenue and Contribution stats to the header ---
+        cat_rev = cat_data['TotalAmount'].sum()
+        cat_perc = (cat_rev / total_business_rev) * 100
+        st.subheader(f"🔹 {selected_cat_deep_dive} (Revenue: ₹{cat_rev:,.0f} | Contribution: {cat_perc:.2f}%)")
         
         # --- NEW ADDITION: CATEGORY SUMMARY STATS ---
         cat_stats_temp = cat_data.groupby('ItemName').agg({'TotalAmount': 'sum', 'Quantity': 'sum'}).reset_index()
