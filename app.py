@@ -12,6 +12,8 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from datetime import timedelta
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import warnings
+import json
+import requests
 
 # --- NEW IMPORTS FOR HYBRID MODEL ---
 from prophet import Prophet
@@ -100,6 +102,108 @@ def get_hourly_details(df):
     hourly_stats['Time Slot'] = hourly_stats['Hour'].apply(lambda h: f"{int(h):02d}:00 - {int(h)+1:02d}:00")
     hourly_stats = hourly_stats.sort_values(['Hour', 'Quantity'], ascending=[True, False])
     return hourly_stats[['Time Slot', 'ItemName', 'Quantity', 'TotalAmount']]
+
+# --- NEW: AI AGENT PAYLOAD GENERATOR ---
+def generate_n8n_payload(df):
+    """
+    Generates a deep structured JSON payload for the n8n AI Agent.
+    This calculates Hourly Curves, Day Ranks, and specific Combo Strategy Logic.
+    """
+    
+    # 1. OVERVIEW DATA
+    total_rev = float(df['TotalAmount'].sum())
+    valid_orders = df[df['TotalAmount'] > 0]
+    total_orders = int(valid_orders['OrderID'].nunique())
+    
+    # Peak Days Ranking
+    day_sales = df.groupby('DayOfWeek')['TotalAmount'].sum().sort_values(ascending=False)
+    sorted_days = day_sales.index.tolist()
+    
+    # Peak Hour Window (Rolling 3hr)
+    hourly_sales = df.groupby('Hour')['TotalAmount'].sum().reindex(range(24), fill_value=0)
+    rolling_sum = hourly_sales.rolling(window=3).sum()
+    peak_hour_end = int(rolling_sum.idxmax())
+    peak_window = f"{max(0, peak_hour_end-2)}:00 - {peak_hour_end+1}:00"
+    
+    # Weekly Performance
+    df['WeekNum'] = df['Date'].dt.isocalendar().week
+    week_sales = df.groupby('WeekNum')['TotalAmount'].sum().sort_values(ascending=False)
+    top_2_weeks_pct = 0
+    if len(week_sales) > 0:
+        top_2_weeks_pct = round((week_sales.head(2).sum() / total_rev) * 100, 1)
+
+    payload = {
+        "report_metadata": {"type": "Monthly Performance", "generated_by": "Mithas AI"},
+        "overview": {
+            "metrics": {
+                "total_revenue": total_rev,
+                "total_orders": total_orders,
+                "avg_order_value": float(total_rev / total_orders) if total_orders > 0 else 0
+            },
+            "day_analysis": {
+                "ranked_days": sorted_days,
+                "top_day_revenue": float(day_sales.iloc[0]) if len(day_sales) > 0 else 0,
+                "top_vs_second_gap_percent": float(((day_sales.iloc[0] - day_sales.iloc[1]) / day_sales.iloc[1]) * 100) if len(day_sales) > 1 else 0
+            },
+            "hour_analysis": {
+                "peak_window_3hr": peak_window,
+                "peak_window_revenue": float(rolling_sum.max())
+            },
+            "weekly_analysis": {
+                "ranked_weeks": week_sales.index.astype(str).tolist(),
+                "top_2_weeks_contribution_percent": top_2_weeks_pct
+            }
+        },
+        "categories": {},
+        "combos": []
+    }
+
+    # 2. CATEGORY DEEP DIVE
+    categories = df['Category'].unique()
+    days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+    
+    for cat in categories:
+        cat_df = df[df['Category'] == cat]
+        cat_rev = float(cat_df['TotalAmount'].sum())
+        
+        # Hourly Curves (Crucial for Narrative: "Starts low, peaks at 5pm...")
+        hourly_curves = {}
+        for d in days_order:
+            # Get sum per hour, reindex to ensure 24 hours (0-23), fill 0
+            d_data = cat_df[cat_df['DayOfWeek'] == d].groupby('Hour')['Quantity'].sum().reindex(range(24), fill_value=0)
+            hourly_curves[d] = d_data.astype(int).tolist()
+            
+        # Pareto Split (Stars vs Laggards) for this category
+        item_sales = cat_df.groupby('ItemName')['TotalAmount'].sum().sort_values(ascending=False)
+        cumulative = item_sales.cumsum() / cat_rev
+        table_1 = item_sales[cumulative <= 0.91].index.tolist()
+        table_2 = item_sales[cumulative > 0.91].index.tolist()
+        
+        payload["categories"][cat] = {
+            "revenue": cat_rev,
+            "contribution_percent": round((cat_rev / total_rev) * 100, 2),
+            "hourly_curves_by_day": hourly_curves,
+            "table_1_stars": table_1,
+            "table_2_laggards": table_2[:10] # Top 10 laggards only to save tokens
+        }
+
+    # 3. COMBO STRATEGY
+    # We leverage the existing logic but formatting for the Agent
+    rules = get_combo_analysis_full(df)
+    if not rules.empty:
+        # Filter for "High Lift" + "High Times Sold Together"
+        strategic_combos = rules.sort_values(['lift', 'Times Sold Together'], ascending=False).head(5)
+        for _, row in strategic_combos.iterrows():
+            payload["combos"].append({
+                "anchor": row['Item A'],
+                "target": row['Item B'],
+                "peak_hour": row['Peak Hour'],
+                "lift": float(row['lift']),
+                "orders_together": int(row['Times Sold Together']),
+                "strategy_note": f"Bundle {row['Item B']} with {row['Item A']} at {row['Peak Hour']}"
+            })
+            
+    return payload
 
 # --- ADVANCED HYBRID FORECASTER (FIXED LOGIC) ---
 
@@ -417,10 +521,35 @@ def plot_time_series_fixed(df, pareto_list, n_items):
 st.title("📊 Mithas Restaurant Intelligence 10.5")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
 
+# --- NEW: SIDEBAR AI CONTROLS ---
+st.sidebar.divider()
+st.sidebar.subheader("🤖 AI Reporting Agent")
+n8n_webhook = st.sidebar.text_input("n8n Webhook URL", placeholder="https://your-n8n.com/webhook/...")
+trigger_btn = st.sidebar.button("Generate & Publish AI Report")
+# -------------------------------
+
 if uploaded_file:
     df = load_data(uploaded_file)
     pareto_list = get_pareto_items(df)
     pareto_count = len(pareto_list)
+    
+    # --- NEW: TRIGGER LOGIC ---
+    if trigger_btn:
+        with st.spinner("🧠 AI Agent is calculating Narrative Curves & Strategies..."):
+            try:
+                payload = generate_n8n_payload(df)
+                if n8n_webhook:
+                    response = requests.post(n8n_webhook, json=payload)
+                    if response.status_code == 200:
+                        st.sidebar.success("✅ Report Request Sent to AI Agent!")
+                    else:
+                        st.sidebar.error(f"❌ Failed: {response.status_code}")
+                else:
+                    st.sidebar.warning("⚠️ No Webhook URL. Displaying Payload below for debugging.")
+                    st.expander("🔍 Debug: Agent Payload", expanded=True).json(payload)
+            except Exception as e:
+                st.sidebar.error(f"Error generating payload: {e}")
+    # --------------------------
     
     rules_df = get_combo_analysis_full(df)
     proven_df, potential_df = get_part3_strategy(rules_df)
