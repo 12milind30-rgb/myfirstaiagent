@@ -158,13 +158,16 @@ def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1, 
     
     # Zhang's Metric
     def zhangs_metric(rule):
-        sup = rule['support']
-        sup_a = rule['antecedent support']
-        sup_c = rule['consequent support']
-        numerator = sup - (sup_a * sup_c)
-        denominator = max(sup * (1 - sup_a), sup_a * (sup_c - sup))
-        if denominator == 0: return 0
-        return numerator / denominator
+        try:
+            sup = rule['support']
+            sup_a = rule['antecedent support']
+            sup_c = rule['consequent support']
+            numerator = sup - (sup_a * sup_c)
+            denominator = max(sup * (1 - sup_a), sup_a * (sup_c - sup))
+            if denominator == 0: return 0
+            return numerator / denominator
+        except:
+            return 0
 
     rules['zhang'] = rules.apply(zhangs_metric, axis=1)
     
@@ -208,9 +211,7 @@ def generate_n8n_payload(df):
     peak_window = f"{max(0, peak_hour_end-2)}:00 - {peak_hour_end+1}:00"
     
     # Business Context (Menu Mix)
-    # Helps the AI understand what kind of restaurant this is
-    cat_mix = df.groupby('Category')['TotalAmount'].sum().sort_values(ascending=False).head(5)
-    menu_mix_str = ", ".join([f"{idx} ({val/total_rev:.1%})" for idx, val in cat_mix.items()])
+    cat_mix = df.groupby('Category')['TotalAmount'].sum().sort_values(ascending=False)
     
     # Weekly Analysis
     df['WeekNum'] = df['Date'].dt.isocalendar().week
@@ -228,8 +229,6 @@ def generate_n8n_payload(df):
     if not rules.empty:
         strategic_combos = rules.sort_values('lift', ascending=False).head(5)
         
-        # Pre-calculate schedules for these specific items
-        # We need to know: When does the Anchor sell? When does the Target sell?
         combo_items = set(strategic_combos['Antecedent']).union(set(strategic_combos['Consequent']))
         item_schedules = {}
         
@@ -262,7 +261,7 @@ def generate_n8n_payload(df):
     # 3. CATEGORY DEEP DIVE (With Item-Specific Hourly Curves)
     # ---------------------------------------------------------
     categories = df['Category'].unique()
-    categories_data = {}
+    categories_list = [] # Changed to List for easier n8n processing
     days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
     
     for cat in categories:
@@ -287,7 +286,6 @@ def generate_n8n_payload(df):
             best_day = i_day_sums.idxmax() if not i_day_sums.empty else "N/A"
             
             # Identify Item's Specific Hourly Curve (0-23)
-            # This allows the AI to see "Lunch Rush" vs "Dinner Rush" per item
             i_hourly_curve = item_data.groupby('Hour')['Quantity'].sum().reindex(range(24), fill_value=0).astype(int).tolist()
             
             top_items_detailed.append({
@@ -295,15 +293,16 @@ def generate_n8n_payload(df):
                 "revenue": float(item_rev_val),
                 "contribution": round((item_rev_val / cat_rev) * 100, 1),
                 "best_day": best_day,
-                "hourly_curve": i_hourly_curve # <--- The Critical Addition
+                "hourly_curve": i_hourly_curve 
             })
 
-        categories_data[cat] = {
+        categories_list.append({
+            "category_name": cat,
             "revenue": cat_rev,
             "contribution_percent": round((cat_rev / total_rev) * 100, 2),
             "hourly_curves": cat_hourly_curves, 
             "items_analysis": top_items_detailed
-        }
+        })
 
     # ---------------------------------------------------------
     # 4. FINAL PAYLOAD ASSEMBLY
@@ -318,9 +317,8 @@ def generate_n8n_payload(df):
                 "avg_rev_per_day": round(total_rev / num_days, 2) if num_days > 0 else 0,
                 "avg_rev_per_week": round(total_rev / num_weeks, 2) if num_weeks > 0 else 0
             },
-            "business_context": {
-                "top_categories_mix": menu_mix_str # Helps AI identify restaurant type
-            },
+            # CRITICAL ADDITION: Summary for Pareto
+            "category_summary": cat_mix.to_dict(),
             "day_analysis": {
                 "ranked_days": day_sales_dict, 
                 "top_day": max(day_sales_dict, key=day_sales_dict.get) if day_sales_dict else "N/A"
@@ -334,7 +332,7 @@ def generate_n8n_payload(df):
                 "top_2_weeks_contribution_percent": top_2_weeks_pct
             }
         },
-        "categories": categories_data,
+        "categories": categories_list, # Now a list for direct looping
         "combos": combos_list
     }
             
@@ -1212,6 +1210,26 @@ if uploaded_file:
                 st.chat_message("assistant").write(response.content)
                 st.session_state.messages.append({"role": "assistant", "content": response.content})
             except: st.error("Check API Key")
+
+    # --- TAB 9: AI AGENT REPORTS (NEW COMMAND CENTER) ---
+    with tab_ai:
+        st.subheader("🤖 AI Agent Command Center")
+        st.info("Trigger autonomous AI agents via n8n to analyze your store data and generate comprehensive reports.")
+        
+        if not webhook_url:
+            st.warning("⚠️ Please enter your n8n Webhook URL in the sidebar settings to use these features.")
+        else:
+            if st.button("Generate Strategy Report"):
+                with st.spinner("Packaging data & sending to AI Strategist..."):
+                    try:
+                        payload = generate_n8n_payload(df)
+                        response = requests.post(webhook_url, json=payload)
+                        if response.status_code == 200:
+                            st.success("✅ Request Sent! Check your Google Drive/Email.")
+                        else:
+                            st.error(f"❌ Error {response.status_code}: {response.text}")
+                    except Exception as e:
+                        st.error(f"Failed: {e}")
 
 else:
     st.info("👋 Upload data to begin.")
