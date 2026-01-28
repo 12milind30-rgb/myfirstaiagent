@@ -108,210 +108,164 @@ def get_hourly_details(df):
 # --- NEW: AI AGENT PAYLOAD GENERATORS (STRATEGIC, CATEGORY, COMBO) ---
 # =================================================================================================
 
-def prepare_strategic_payload(df):
+def generate_n8n_payload(df):
     """
-    Prepares a comprehensive dataset for the AI Strategist (Overview Agent).
-    Calculates Time-based averages, Peak Hours, and Trends.
+    Generates a deep, granular JSON payload for Mithas AI Agents.
+    Includes Item-Level Hourly Matrices and Combo Schedules.
     """
-    # 1. Basic Metrics
-    total_revenue = df['TotalAmount'].sum()
-    total_orders = df['OrderID'].nunique()
-    avg_order_value = total_revenue / total_orders if total_orders > 0 else 0
-
-    # 2. Time-Based Averages
-    df['Date'] = pd.to_datetime(df['Date'])
+    # ---------------------------------------------------------
+    # 1. OVERVIEW DATA
+    # ---------------------------------------------------------
+    total_rev = float(df['TotalAmount'].sum())
+    valid_orders = df[df['TotalAmount'] > 0]
+    total_orders = int(valid_orders['OrderID'].nunique())
     
-    # Avg Revenue per Day
-    daily_sales = df.groupby(df['Date'].dt.date)['TotalAmount'].sum()
-    avg_rev_per_day = daily_sales.mean()
-
-    # Avg Revenue per Week
-    weekly_sales = df.groupby(df['Date'].dt.isocalendar().week)['TotalAmount'].sum()
-    avg_rev_per_week = weekly_sales.mean()
-
-    # 3. Peak Hours Data
-    peak_hours = df.groupby(df['Hour'])['TotalAmount'].sum().reset_index()
-    peak_hours.columns = ['Hour', 'Revenue']
-    peak_hours_data = peak_hours.to_dict(orient='records')
-
-    # 4. Revenue Trend (Daily)
-    daily_trend = df.groupby(df['Date'].dt.date)['TotalAmount'].sum().reset_index()
-    daily_trend.columns = ['Date', 'Revenue']
-    daily_trend['Date'] = daily_trend['Date'].astype(str) # Serialize date
-    trend_data = daily_trend.to_dict(orient='records')
-
-    # 5. Weekly Performance
-    weekly_trend = df.groupby(df['Date'].dt.isocalendar().week)['TotalAmount'].sum().reset_index()
-    weekly_trend.columns = ['Week_Number', 'Revenue']
-    weekly_performance_data = weekly_trend.to_dict(orient='records')
-
-    payload = {
-        "summary_metrics": {
-            "total_revenue": round(total_revenue, 2),
-            "total_orders": total_orders,
-            "average_order_value": round(avg_order_value, 2),
-            "average_revenue_per_day": round(avg_rev_per_day, 2),
-            "average_revenue_per_week": round(avg_rev_per_week, 2)
-        },
-        "graph_data": {
-            "peak_hours_analysis": peak_hours_data,
-            "daily_revenue_trend": trend_data,
-            "weekly_performance": weekly_performance_data
-        }
-    }
-    return payload
-
-def prepare_category_detailed_payload(df):
-    """
-    Prepares deep-dive dataset for Category Agent.
-    Structure: Global Overview (80/20) -> Per Category -> Per Item Matrix.
-    """
-    df = df.copy()
-    df['Date'] = pd.to_datetime(df['Date'])
-    df['Day_Name'] = df['Date'].dt.day_name()
+    # Time calculations
+    num_days = df['Date'].nunique()
+    num_weeks = df['Date'].dt.isocalendar().week.nunique()
     
-    # 1. GLOBAL OVERVIEW (80/20 Rule)
-    category_revenue = df.groupby('Category')['TotalAmount'].sum().reset_index()
-    category_revenue = category_revenue.sort_values('TotalAmount', ascending=False)
-    category_overview = category_revenue.to_dict(orient='records')
-
-    # 2. DEEP DIVE DICTIONARY
-    categories_data = {}
-    all_categories = df['Category'].unique()
+    # Granular Trends (Dictionary format for AI reading)
+    day_sales_dict = df.groupby('DayOfWeek')['TotalAmount'].sum().to_dict()
+    hourly_sales_dict = df.groupby('Hour')['TotalAmount'].sum().astype(int).to_dict()
     
-    for cat in all_categories:
-        cat_df = df[df['Category'] == cat]
+    # Peak Window Calculation
+    hourly_series = df.groupby('Hour')['TotalAmount'].sum().reindex(range(24), fill_value=0)
+    rolling_sum = hourly_series.rolling(window=3).sum()
+    peak_hour_end = int(rolling_sum.idxmax())
+    peak_window = f"{max(0, peak_hour_end-2)}:00 - {peak_hour_end+1}:00"
+    
+    # Business Context (Menu Mix)
+    # Helps the AI understand what kind of restaurant this is
+    cat_mix = df.groupby('Category')['TotalAmount'].sum().sort_values(ascending=False).head(5)
+    menu_mix_str = ", ".join([f"{idx} ({val/total_rev:.1%})" for idx, val in cat_mix.items()])
+    
+    # Weekly Analysis
+    df['WeekNum'] = df['Date'].dt.isocalendar().week
+    week_sales = df.groupby('WeekNum')['TotalAmount'].sum().sort_values(ascending=False)
+    top_2_weeks_pct = 0
+    if len(week_sales) > 0:
+        top_2_weeks_pct = round((week_sales.head(2).sum() / total_rev) * 100, 1)
+
+    # ---------------------------------------------------------
+    # 2. COMBO DATA (With Schedule Context)
+    # ---------------------------------------------------------
+    rules = run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1, min_orders=2)
+    combos_list = []
+    
+    if not rules.empty:
+        strategic_combos = rules.sort_values('lift', ascending=False).head(5)
         
-        # A. Category Level Trends
-        cat_daily = cat_df.groupby('Day_Name')['TotalAmount'].sum().to_dict()
-        cat_hourly = cat_df.groupby('Hour')['TotalAmount'].sum().to_dict()
+        # Pre-calculate schedules for these specific items
+        # We need to know: When does the Anchor sell? When does the Target sell?
+        combo_items = set(strategic_combos['Antecedent']).union(set(strategic_combos['Consequent']))
+        item_schedules = {}
         
-        # B. Item Level Trends (The Matrix)
-        items_data = []
-        for item in cat_df['ItemName'].unique():
-            item_df = cat_df[cat_df['ItemName'] == item]
+        for item in combo_items:
+            i_data = df[df['ItemName'] == item]
+            if not i_data.empty:
+                d_sums = i_data.groupby('DayOfWeek')['TotalAmount'].sum().sort_values(ascending=False)
+                item_schedules[item] = {
+                    "best_day": d_sums.idxmax(),
+                    "worst_day": d_sums.idxmin()
+                }
+
+        for _, row in strategic_combos.iterrows():
+            anchor = row['Antecedent']
+            target = row['Consequent']
             
-            # Specific item patterns
-            item_daily = item_df.groupby('Day_Name')['TotalAmount'].sum().to_dict()
-            item_hourly = item_df.groupby('Hour')['TotalAmount'].sum().to_dict()
-            item_total = item_df['TotalAmount'].sum()
-            
-            items_data.append({
-                "item_name": item,
-                "total_revenue": round(item_total, 2),
-                "daily_pattern": item_daily,
-                "hourly_pattern": item_hourly
+            combos_list.append({
+                "anchor": anchor,
+                "target": target,
+                "lift": round(float(row['lift']), 2),
+                "confidence": round(float(row['confidence']), 2),
+                "conviction": round(float(row['conviction']), 2) if row['conviction'] != float('inf') else 100.0,
+                "zhang": round(float(row['zhang']), 2),
+                "orders_together": int(row['Times Sold Together']),
+                "anchor_schedule": item_schedules.get(anchor, {}),
+                "target_schedule": item_schedules.get(target, {})
             })
+
+    # ---------------------------------------------------------
+    # 3. CATEGORY DEEP DIVE (With Item-Specific Hourly Curves)
+    # ---------------------------------------------------------
+    categories = df['Category'].unique()
+    categories_data = {}
+    days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+    
+    for cat in categories:
+        cat_df = df[df['Category'] == cat]
+        cat_rev = float(cat_df['TotalAmount'].sum())
+        
+        # 1. Category-Level Hourly Curves (General Trend)
+        cat_hourly_curves = {}
+        for d in days_order:
+            d_data = cat_df[cat_df['DayOfWeek'] == d].groupby('Hour')['Quantity'].sum().reindex(range(24), fill_value=0)
+            cat_hourly_curves[d] = d_data.astype(int).tolist()
             
+        # 2. Item-Level Granular Data (Top 5 Items)
+        item_sales = cat_df.groupby('ItemName')['TotalAmount'].sum().sort_values(ascending=False).head(5)
+        top_items_detailed = []
+        
+        for item_name, item_rev_val in item_sales.items():
+            item_data = cat_df[cat_df['ItemName'] == item_name]
+            
+            # Identify Item's Best/Worst Day
+            i_day_sums = item_data.groupby('DayOfWeek')['TotalAmount'].sum()
+            best_day = i_day_sums.idxmax() if not i_day_sums.empty else "N/A"
+            
+            # Identify Item's Specific Hourly Curve (0-23)
+            # This allows the AI to see "Lunch Rush" vs "Dinner Rush" per item
+            i_hourly_curve = item_data.groupby('Hour')['Quantity'].sum().reindex(range(24), fill_value=0).astype(int).tolist()
+            
+            top_items_detailed.append({
+                "name": item_name,
+                "revenue": float(item_rev_val),
+                "contribution": round((item_rev_val / cat_rev) * 100, 1),
+                "best_day": best_day,
+                "hourly_curve": i_hourly_curve # <--- The Critical Addition
+            })
+
         categories_data[cat] = {
-            "category_metrics": {
-                "total_revenue": round(cat_df['TotalAmount'].sum(), 2),
-                "daily_sales": cat_daily,
-                "hourly_sales": cat_hourly
-            },
-            "items_analysis": items_data
+            "revenue": cat_rev,
+            "contribution_percent": round((cat_rev / total_rev) * 100, 2),
+            "hourly_curves": cat_hourly_curves, 
+            "items_analysis": top_items_detailed
         }
 
-    return {
-        "overview_80_20": category_overview,
-        "deep_dives": categories_data
-    }
-
-def calculate_smart_combos_ai(df):
-    """
-    Advanced Association Rules for AI Agent: Support, Confidence, Lift, Conviction, Zhang's Metric.
-    Filters out 'Gifts and Toys' and 'Display Items'.
-    """
-    # 1. FILTER EXCLUDED CATEGORIES
-    excluded_cats = ['Gifts and Toys', 'Display Items']
-    valid_df = df[~df['Category'].isin(excluded_cats)].copy()
-
-    # 2. GROUP ORDERS
-    orders = valid_df.groupby('OrderID')['ItemName'].unique().tolist()
-    item_counts = valid_df['ItemName'].value_counts().to_dict()
-    total_orders = len(orders)
-    
-    pair_counts = Counter()
-    for order_items in orders:
-        if len(order_items) > 1:
-            pair_counts.update(combinations(sorted(order_items), 2))
-            
-    # 3. CALCULATE METRICS
-    combos_data = []
-    # Analyze top 100 pairs for efficiency in AI Payload
-    for (item_a, item_b), count in pair_counts.most_common(100):
-        support_ab = count / total_orders
-        support_a = item_counts[item_a] / total_orders
-        support_b = item_counts[item_b] / total_orders
-        
-        # Confidence
-        conf_a_to_b = support_ab / support_a
-        conf_b_to_a = support_ab / support_b
-        confidence = max(conf_a_to_b, conf_b_to_a)
-        
-        # Lift
-        lift = support_ab / (support_a * support_b) if (support_a * support_b) > 0 else 0
-        
-        # Conviction
-        conv_a_to_b = (1 - support_b) / (1 - conf_a_to_b) if (1 - conf_a_to_b) > 0 else 100
-        conv_b_to_a = (1 - support_a) / (1 - conf_b_to_a) if (1 - conf_b_to_a) > 0 else 100
-        conviction = max(conv_a_to_b, conv_b_to_a)
-        
-        # Zhang's Metric
-        numerator = support_ab - (support_a * support_b)
-        if numerator >= 0:
-            denominator = min(support_a * (1 - support_b), support_b * (1 - support_a))
-        else:
-            denominator = min(support_a * support_b, (1 - support_a) * (1 - support_b))
-        
-        zhangs_metric = numerator / denominator if denominator > 0 else 0
-
-        combos_data.append({
-            "items": [item_a, item_b],
+    # ---------------------------------------------------------
+    # 4. FINAL PAYLOAD ASSEMBLY
+    # ---------------------------------------------------------
+    payload = {
+        "report_metadata": {"type": "Monthly Performance", "generated_by": "Mithas AI"},
+        "overview": {
             "metrics": {
-                "support": round(support_ab, 4),
-                "confidence": round(confidence, 2),
-                "lift": round(lift, 2),
-                "conviction": round(conviction, 2),
-                "zhangs_metric": round(zhangs_metric, 2)
+                "total_revenue": total_rev,
+                "total_orders": total_orders,
+                "avg_order_value": float(total_rev / total_orders) if total_orders > 0 else 0,
+                "avg_rev_per_day": round(total_rev / num_days, 2) if num_days > 0 else 0,
+                "avg_rev_per_week": round(total_rev / num_weeks, 2) if num_weeks > 0 else 0
+            },
+            "business_context": {
+                "top_categories_mix": menu_mix_str # Helps AI identify restaurant type
+            },
+            "day_analysis": {
+                "ranked_days": day_sales_dict, 
+                "top_day": max(day_sales_dict, key=day_sales_dict.get) if day_sales_dict else "N/A"
+            },
+            "hour_analysis": {
+                "peak_window_3hr": peak_window,
+                "hourly_distribution": hourly_sales_dict
+            },
+            "weekly_analysis": {
+                "ranked_weeks": week_sales.to_dict(),
+                "top_2_weeks_contribution_percent": top_2_weeks_pct
             }
-        })
-        
-    return combos_data, valid_df
-
-def prepare_combo_strategy_payload(df):
-    """
-    Combines Metrics with Schedules for the Combo Agent.
-    """
-    smart_combos, valid_df = calculate_smart_combos_ai(df)
-    
-    # Get Schedules for relevant items
-    item_schedules = {}
-    target_items = set()
-    for c in smart_combos:
-        target_items.update(c['items'])
-        
-    valid_df['Day'] = pd.to_datetime(valid_df['Date']).dt.day_name()
-    
-    for item in target_items:
-        item_data = valid_df[valid_df['ItemName'] == item]
-        
-        # Avoid errors if item has no sales (rare if in combo, but safety first)
-        if not item_data.empty:
-            busy_days = item_data.groupby('Day')['TotalAmount'].sum().nlargest(3).index.tolist()
-            slow_days = item_data.groupby('Day')['TotalAmount'].sum().nsmallest(3).index.tolist()
-            busy_hours = item_data.groupby('Hour')['TotalAmount'].sum().nlargest(5).index.tolist()
-            
-            item_schedules[item] = {
-                "high_revenue_days": busy_days,
-                "low_revenue_days": slow_days,
-                "peak_hours": busy_hours
-            }
-
-    return {
-        "smart_combos_data": smart_combos,
-        "item_schedules": item_schedules
+        },
+        "categories": categories_data,
+        "combos": combos_list
     }
+            
+    return payload
 
 # =================================================================================================
 
