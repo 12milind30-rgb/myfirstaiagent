@@ -108,6 +108,79 @@ def get_hourly_details(df):
 # --- NEW: AI AGENT PAYLOAD GENERATORS (STRATEGIC, CATEGORY, COMBO) ---
 # =================================================================================================
 
+def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1, min_orders=2):
+    # 1. Setup Basket
+    valid_df = df[df['Quantity'] > 0]
+    
+    # Group by Transaction to get the "Basket"
+    qty_basket = valid_df.groupby(['OrderID', level])['Quantity'].sum().unstack(fill_value=0)
+    
+    # Boolean Basket for FP-Growth (0/1)
+    basket_sets = (qty_basket > 0).astype(bool) 
+    
+    # 2. Run FP-Growth
+    frequent_itemsets = fpgrowth(basket_sets, min_support=min_sup, use_colnames=True)
+    if frequent_itemsets.empty: return pd.DataFrame()
+    
+    rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_conf)
+    
+    # 3. Logic: Calculate "Times Sold Together" (Transaction Count)
+    def get_transaction_stats(row):
+        ant = list(row['antecedents'])[0]
+        con = list(row['consequents'])[0]
+        
+        # Find rows where BOTH are present
+        common_mask = (qty_basket[ant] > 0) & (qty_basket[con] > 0)
+        orders_count = common_mask.sum()
+        
+        # Sum quantities in those specific common orders
+        qty_ant = qty_basket.loc[common_mask, ant].sum()
+        qty_con = qty_basket.loc[common_mask, con].sum()
+        
+        return pd.Series([orders_count, qty_ant, qty_con])
+
+    stats = rules.apply(get_transaction_stats, axis=1)
+    rules['Times Sold Together'] = stats[0].astype(int)
+    rules['Qty A'] = stats[1].astype(int)
+    rules['Qty B'] = stats[2].astype(int)
+    
+    # 4. Filter by Minimum Orders (The Noise Killer)
+    rules = rules[rules['Times Sold Together'] >= min_orders]
+    
+    if rules.empty: return pd.DataFrame()
+
+    # 5. Clean & Format Output
+    rules['Support (%)'] = (rules['support'] * 100).round(2)
+    rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
+    rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
+        
+    rules['Total Qty (Split)'] = rules.apply(lambda x: f"{x['Qty A'] + x['Qty B']} ({x['Qty A']} + {x['Qty B']})", axis=1)
+    
+    # Zhang's Metric
+    def zhangs_metric(rule):
+        sup = rule['support']
+        sup_a = rule['antecedent support']
+        sup_c = rule['consequent support']
+        numerator = sup - (sup_a * sup_c)
+        denominator = max(sup * (1 - sup_a), sup_a * (sup_c - sup))
+        if denominator == 0: return 0
+        return numerator / denominator
+
+    rules['zhang'] = rules.apply(zhangs_metric, axis=1)
+    
+    # Deduplicate A->B and B->A (Keep the one with higher confidence or just first)
+    rules['pair_key'] = rules.apply(lambda x: frozenset([x['Antecedent'], x['Consequent']]), axis=1)
+    rules = rules.drop_duplicates(subset=['pair_key'])
+    
+    rules = rules.sort_values('Times Sold Together', ascending=False)
+    
+    # --- CRITICAL FIX: Replace Infinite/NaN values so JSON doesn't break in n8n ---
+    rules.replace([np.inf, -np.inf], 100, inplace=True)
+    rules.fillna(0, inplace=True)
+    
+    # --- UPDATED: Added 'conviction' to the return list ---
+    return rules[['Antecedent', 'Consequent', 'Times Sold Together', 'Support (%)', 'Total Qty (Split)', 'confidence', 'lift', 'zhang', 'conviction']]
+
 def generate_n8n_payload(df):
     """
     Generates a deep, granular JSON payload for Mithas AI Agents.
@@ -267,179 +340,6 @@ def generate_n8n_payload(df):
             
     return payload
 
-# =================================================================================================
-
-# --- ADVANCED HYBRID FORECASTER (FIXED LOGIC) ---
-
-class HybridDemandForecaster:
-    def __init__(self, seasonality_mode='multiplicative'):
-        # Changed daily_seasonality to False because we are feeding daily data
-        self.prophet_model = Prophet(seasonality_mode=seasonality_mode, yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
-        try: self.prophet_model.add_country_holidays(country_name='IN')
-        except: pass 
-        
-        # --- FIX: REMOVED early_stopping_rounds=50 TO FIX VALIDATION DATASET ERROR ---
-        self.xgb_model = XGBRegressor(n_estimators=1000, learning_rate=0.05, max_depth=6, n_jobs=-1, objective='reg:squarederror')
-        
-        self.rf_model = RandomForestRegressor(n_estimators=200, max_depth=10, n_jobs=-1, random_state=42)
-        self.meta_model = Ridge(alpha=1.0)
-        self.scaler = StandardScaler()
-        self.last_training_date = None
-        self.training_data_tail = None 
-        self.is_fitted = False
-        self.feature_columns = []
-
-    def create_features(self, df, is_future=False):
-        df_feat = df.copy()
-        df_feat['dayofweek'] = df_feat['ds'].dt.dayofweek
-        df_feat['quarter'] = df_feat['ds'].dt.quarter
-        df_feat['month'] = df_feat['ds'].dt.month
-        df_feat['is_weekend'] = df_feat['dayofweek'].apply(lambda x: 1 if x >= 5 else 0)
-        
-        # --- FIX: LOGIC ADAPTED FOR DAILY DATA (NOT HOURLY) ---
-        # --- FIX 2: Removed "and not is_future" to ensure columns are created during prediction ---
-        if 'y' in df_feat.columns:
-            df_feat['lag_1d'] = df_feat['y'].shift(1)
-            df_feat['lag_7d'] = df_feat['y'].shift(7)
-            df_feat['rolling_mean_3d'] = df_feat['y'].rolling(window=3).mean()
-            df_feat['rolling_std_7d'] = df_feat['y'].rolling(window=7).std()
-            
-        df_feat = df_feat.fillna(0)
-        return df_feat
-
-    def fit(self, df):
-        # Ensure timezone naive
-        df['ds'] = df['ds'].dt.tz_localize(None)
-        
-        self.last_training_date = df['ds'].max()
-        self.training_data_tail = df.tail(14).copy() # Keep last 14 days for context
-        self.prophet_model.fit(df)
-        
-        df_ml = self.create_features(df)
-        drop_cols = ['ds', 'y', 'yhat']
-        self.feature_columns = [c for c in df_ml.columns if c not in drop_cols and np.issubdtype(df_ml[c].dtype, np.number)]
-        
-        X = df_ml[self.feature_columns]
-        y = df['y']
-        
-        # --- FIX: APPLY SCALER ---
-        X_scaled = self.scaler.fit_transform(X)
-        
-        self.xgb_model.fit(X_scaled, y, verbose=False)
-        self.rf_model.fit(X_scaled, y)
-        
-        pred_prophet = self.prophet_model.predict(df)['yhat'].values
-        pred_xgb = self.xgb_model.predict(X_scaled)
-        pred_rf = self.rf_model.predict(X_scaled)
-        
-        stacked_X = np.column_stack((pred_prophet, pred_xgb, pred_rf))
-        self.meta_model.fit(stacked_X, y)
-        self.is_fitted = True
-
-    def predict(self, periods=30):
-        if not self.is_fitted: raise Exception("Model not fitted yet.")
-        
-        future_prophet = self.prophet_model.make_future_dataframe(periods=periods, freq='D')
-        forecast_prophet = self.prophet_model.predict(future_prophet)
-        
-        future_dates = future_prophet.tail(periods).copy()
-        extended_df = pd.concat([self.training_data_tail, future_dates], axis=0, ignore_index=True)
-        extended_feat = self.create_features(extended_df, is_future=True)
-        
-        X_future = extended_feat.tail(periods)[self.feature_columns]
-        
-        # --- FIX: TRANSFORM FUTURE DATA ---
-        X_future_scaled = self.scaler.transform(X_future)
-        
-        pred_prophet = forecast_prophet['yhat'].tail(periods).values
-        pred_xgb = self.xgb_model.predict(X_future_scaled)
-        pred_rf = self.rf_model.predict(X_future_scaled)
-        
-        stacked_future = np.column_stack((pred_prophet, pred_xgb, pred_rf))
-        final_pred = self.meta_model.predict(stacked_future)
-        
-        result = future_dates[['ds']].copy()
-        result['Predicted_Demand'] = np.maximum(final_pred, 0)
-        result['Prophet_View'] = pred_prophet
-        result['XGB_View'] = pred_xgb
-        result['RF_View'] = pred_rf
-        return result
-
-# --- COMBO & ASSOCIATION LOGIC (REFINED) ---
-
-def run_advanced_association(df, level='ItemName', min_sup=0.005, min_conf=0.1, min_orders=2):
-    # 1. Setup Basket
-    valid_df = df[df['Quantity'] > 0]
-    
-    # Group by Transaction to get the "Basket"
-    qty_basket = valid_df.groupby(['OrderID', level])['Quantity'].sum().unstack(fill_value=0)
-    
-    # Boolean Basket for FP-Growth (0/1)
-    basket_sets = (qty_basket > 0).astype(bool) 
-    
-    # 2. Run FP-Growth
-    frequent_itemsets = fpgrowth(basket_sets, min_support=min_sup, use_colnames=True)
-    if frequent_itemsets.empty: return pd.DataFrame()
-    
-    rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_conf)
-    
-    # 3. Logic: Calculate "Times Sold Together" (Transaction Count)
-    def get_transaction_stats(row):
-        ant = list(row['antecedents'])[0]
-        con = list(row['consequents'])[0]
-        
-        # Find rows where BOTH are present
-        common_mask = (qty_basket[ant] > 0) & (qty_basket[con] > 0)
-        orders_count = common_mask.sum()
-        
-        # Sum quantities in those specific common orders
-        qty_ant = qty_basket.loc[common_mask, ant].sum()
-        qty_con = qty_basket.loc[common_mask, con].sum()
-        
-        return pd.Series([orders_count, qty_ant, qty_con])
-
-    stats = rules.apply(get_transaction_stats, axis=1)
-    rules['Times Sold Together'] = stats[0].astype(int)
-    rules['Qty A'] = stats[1].astype(int)
-    rules['Qty B'] = stats[2].astype(int)
-    
-    # 4. Filter by Minimum Orders (The Noise Killer)
-    rules = rules[rules['Times Sold Together'] >= min_orders]
-    
-    if rules.empty: return pd.DataFrame()
-
-    # 5. Clean & Format Output
-    rules['Support (%)'] = (rules['support'] * 100).round(2)
-    rules['Antecedent'] = rules['antecedents'].apply(lambda x: list(x)[0])
-    rules['Consequent'] = rules['consequents'].apply(lambda x: list(x)[0])
-    
-    # --- UPDATED: REMOVED CATEGORY SELF-REFERENCE CHECK TO FIX USER ISSUE ---
-    # if level == 'Category':
-    #     rules = rules[rules['Antecedent'] != rules['Consequent']]
-        
-    rules['Total Qty (Split)'] = rules.apply(lambda x: f"{x['Qty A'] + x['Qty B']} ({x['Qty A']} + {x['Qty B']})", axis=1)
-    
-    # Zhang's Metric
-    def zhangs_metric(rule):
-        sup = rule['support']
-        sup_a = rule['antecedent support']
-        sup_c = rule['consequent support']
-        numerator = sup - (sup_a * sup_c)
-        denominator = max(sup * (1 - sup_a), sup_a * (sup_c - sup))
-        if denominator == 0: return 0
-        return numerator / denominator
-
-    rules['zhang'] = rules.apply(zhangs_metric, axis=1)
-    
-    # Deduplicate A->B and B->A (Keep the one with higher confidence or just first)
-    rules['pair_key'] = rules.apply(lambda x: frozenset([x['Antecedent'], x['Consequent']]), axis=1)
-    rules = rules.drop_duplicates(subset=['pair_key'])
-    
-    rules = rules.sort_values('Times Sold Together', ascending=False)
-    
-    # --- UPDATED: Added 'conviction' to the return list ---
-    return rules[['Antecedent', 'Consequent', 'Times Sold Together', 'Support (%)', 'Total Qty (Split)', 'confidence', 'lift', 'zhang', 'conviction']]
-
 def get_combo_analysis_full(df):
     valid_df = df[df['Quantity'] > 0]
     basket = valid_df.groupby(['OrderID', 'ItemName'])['Quantity'].count().unstack().fillna(0)
@@ -581,6 +481,102 @@ def plot_time_series_fixed(df, pareto_list, n_items):
         fig.update_yaxes(matches=None, showticklabels=True)
         st.plotly_chart(fig, use_container_width=True)
 
+# --- ADVANCED HYBRID FORECASTER (FIXED LOGIC) ---
+
+class HybridDemandForecaster:
+    def __init__(self, seasonality_mode='multiplicative'):
+        # Changed daily_seasonality to False because we are feeding daily data
+        self.prophet_model = Prophet(seasonality_mode=seasonality_mode, yearly_seasonality=True, weekly_seasonality=True, daily_seasonality=False)
+        try: self.prophet_model.add_country_holidays(country_name='IN')
+        except: pass 
+        
+        # --- FIX: REMOVED early_stopping_rounds=50 TO FIX VALIDATION DATASET ERROR ---
+        self.xgb_model = XGBRegressor(n_estimators=1000, learning_rate=0.05, max_depth=6, n_jobs=-1, objective='reg:squarederror')
+        
+        self.rf_model = RandomForestRegressor(n_estimators=200, max_depth=10, n_jobs=-1, random_state=42)
+        self.meta_model = Ridge(alpha=1.0)
+        self.scaler = StandardScaler()
+        self.last_training_date = None
+        self.training_data_tail = None 
+        self.is_fitted = False
+        self.feature_columns = []
+
+    def create_features(self, df, is_future=False):
+        df_feat = df.copy()
+        df_feat['dayofweek'] = df_feat['ds'].dt.dayofweek
+        df_feat['quarter'] = df_feat['ds'].dt.quarter
+        df_feat['month'] = df_feat['ds'].dt.month
+        df_feat['is_weekend'] = df_feat['dayofweek'].apply(lambda x: 1 if x >= 5 else 0)
+        
+        # --- FIX: LOGIC ADAPTED FOR DAILY DATA (NOT HOURLY) ---
+        # --- FIX 2: Removed "and not is_future" to ensure columns are created during prediction ---
+        if 'y' in df_feat.columns:
+            df_feat['lag_1d'] = df_feat['y'].shift(1)
+            df_feat['lag_7d'] = df_feat['y'].shift(7)
+            df_feat['rolling_mean_3d'] = df_feat['y'].rolling(window=3).mean()
+            df_feat['rolling_std_7d'] = df_feat['y'].rolling(window=7).std()
+            
+        df_feat = df_feat.fillna(0)
+        return df_feat
+
+    def fit(self, df):
+        # Ensure timezone naive
+        df['ds'] = df['ds'].dt.tz_localize(None)
+        
+        self.last_training_date = df['ds'].max()
+        self.training_data_tail = df.tail(14).copy() # Keep last 14 days for context
+        self.prophet_model.fit(df)
+        
+        df_ml = self.create_features(df)
+        drop_cols = ['ds', 'y', 'yhat']
+        self.feature_columns = [c for c in df_ml.columns if c not in drop_cols and np.issubdtype(df_ml[c].dtype, np.number)]
+        
+        X = df_ml[self.feature_columns]
+        y = df['y']
+        
+        # --- FIX: APPLY SCALER ---
+        X_scaled = self.scaler.fit_transform(X)
+        
+        self.xgb_model.fit(X_scaled, y, verbose=False)
+        self.rf_model.fit(X_scaled, y)
+        
+        pred_prophet = self.prophet_model.predict(df)['yhat'].values
+        pred_xgb = self.xgb_model.predict(X_scaled)
+        pred_rf = self.rf_model.predict(X_scaled)
+        
+        stacked_X = np.column_stack((pred_prophet, pred_xgb, pred_rf))
+        self.meta_model.fit(stacked_X, y)
+        self.is_fitted = True
+
+    def predict(self, periods=30):
+        if not self.is_fitted: raise Exception("Model not fitted yet.")
+        
+        future_prophet = self.prophet_model.make_future_dataframe(periods=periods, freq='D')
+        forecast_prophet = self.prophet_model.predict(future_prophet)
+        
+        future_dates = future_prophet.tail(periods).copy()
+        extended_df = pd.concat([self.training_data_tail, future_dates], axis=0, ignore_index=True)
+        extended_feat = self.create_features(extended_df, is_future=True)
+        
+        X_future = extended_feat.tail(periods)[self.feature_columns]
+        
+        # --- FIX: TRANSFORM FUTURE DATA ---
+        X_future_scaled = self.scaler.transform(X_future)
+        
+        pred_prophet = forecast_prophet['yhat'].tail(periods).values
+        pred_xgb = self.xgb_model.predict(X_future_scaled)
+        pred_rf = self.rf_model.predict(X_future_scaled)
+        
+        stacked_future = np.column_stack((pred_prophet, pred_xgb, pred_rf))
+        final_pred = self.meta_model.predict(stacked_future)
+        
+        result = future_dates[['ds']].copy()
+        result['Predicted_Demand'] = np.maximum(final_pred, 0)
+        result['Prophet_View'] = pred_prophet
+        result['XGB_View'] = pred_xgb
+        result['RF_View'] = pred_rf
+        return result
+
 # --- MAIN APP LAYOUT ---
 st.title("📊 Mithas Restaurant Intelligence 10.5")
 uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=['xlsx'])
@@ -589,12 +585,31 @@ uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=[
 st.sidebar.divider()
 st.sidebar.subheader("🤖 AI Reporting Agent")
 n8n_webhook = st.sidebar.text_input("n8n Webhook URL", placeholder="https://your-n8n.com/webhook/...")
-# Trigger logic moved to Tab 9
+trigger_btn = st.sidebar.button("Generate & Publish AI Report")
+# -------------------------------
 
 if uploaded_file:
     df = load_data(uploaded_file)
     pareto_list = get_pareto_items(df)
     pareto_count = len(pareto_list)
+    
+    # --- NEW: TRIGGER LOGIC ---
+    if trigger_btn:
+        with st.spinner("🧠 AI Agent is calculating Narrative Curves & Strategies..."):
+            try:
+                payload = generate_n8n_payload(df)
+                if n8n_webhook:
+                    response = requests.post(n8n_webhook, json=payload)
+                    if response.status_code == 200:
+                        st.sidebar.success("✅ Report Request Sent to AI Agent!")
+                    else:
+                        st.sidebar.error(f"❌ Failed: {response.status_code}")
+                else:
+                    st.sidebar.warning("⚠️ No Webhook URL. Displaying Payload below for debugging.")
+                    st.expander("🔍 Debug: Agent Payload", expanded=True).json(payload)
+            except Exception as e:
+                st.sidebar.error(f"Error generating payload: {e}")
+    # --------------------------
     
     rules_df = get_combo_analysis_full(df)
     proven_df, potential_df = get_part3_strategy(rules_df)
@@ -604,9 +619,8 @@ if uploaded_file:
     if not proven_df.empty: proven_list = proven_df['pair'].tolist()
     if not potential_df.empty: potential_list = potential_df['pair'].tolist()
     
-    # --- UPDATED TABS LIST with 'AI Reports' ---
-    tab1, tab_day_wise, tab_cat, tab2, tab3, tab4, tab_assoc, tab5, tab6, tab_ai = st.tabs([
-        "Overview", "Day wise Analysis", "Category Details", "Pareto (Visual)", "Time Series", "Smart Combos", "Association Analysis", "Demand Forecast", "AI Chat", "🤖 AI Reports"
+    tab1, tab_day_wise, tab_cat, tab2, tab3, tab4, tab_assoc, tab5, tab6 = st.tabs([
+        "Overview", "Day wise Analysis", "Category Details", "Pareto (Visual)", "Time Series", "Smart Combos", "Association Analysis", "Demand Forecast", "AI Chat"
     ])
 
     # --- TAB 1: OVERVIEW ---
@@ -1198,64 +1212,6 @@ if uploaded_file:
                 st.chat_message("assistant").write(response.content)
                 st.session_state.messages.append({"role": "assistant", "content": response.content})
             except: st.error("Check API Key")
-
-    # --- TAB 9: AI AGENT REPORTS (NEW COMMAND CENTER) ---
-    with tab_ai:
-        st.subheader("🤖 AI Agent Command Center")
-        st.info("Trigger autonomous AI agents via n8n to analyze your store data and generate comprehensive reports.")
-        
-        if not webhook_url:
-            st.warning("⚠️ Please enter your n8n Webhook URL in the sidebar settings to use these features.")
-        else:
-            ai_col1, ai_col2, ai_col3 = st.columns(3)
-            
-            # Button 1: Strategic Overview
-            with ai_col1:
-                st.markdown("#### 📝 Strategic Overview")
-                st.caption("Analyzes Revenue, Peak Hours, and Monthly Trends.")
-                if st.button("Generate Strategy Report"):
-                    with st.spinner("Packaging data & sending to AI Strategist..."):
-                        try:
-                            payload = prepare_strategic_payload(df)
-                            response = requests.post(webhook_url, json=payload)
-                            if response.status_code == 200:
-                                st.success("✅ Request Sent! Check your Google Drive/Email.")
-                            else:
-                                st.error(f"❌ Error {response.status_code}: {response.text}")
-                        except Exception as e:
-                            st.error(f"Failed: {e}")
-
-            # Button 2: Detailed Category Deep Dive
-            with ai_col2:
-                st.markdown("#### 🔍 Category Deep-Dive")
-                st.caption("Analyzes 80/20 Rule and Item-level Hourly Matrices.")
-                if st.button("Generate Category Report"):
-                    with st.spinner("Calculating Item Matrices..."):
-                        try:
-                            payload = prepare_category_detailed_payload(df)
-                            response = requests.post(webhook_url, json=payload)
-                            if response.status_code == 200:
-                                st.success("✅ Request Sent! Check your Google Drive.")
-                            else:
-                                st.error(f"❌ Error {response.status_code}: {response.text}")
-                        except Exception as e:
-                            st.error(f"Failed: {e}")
-
-            # Button 3: Advanced Combo Strategy
-            with ai_col3:
-                st.markdown("#### 🍔 Advanced Combo Strategy")
-                st.caption("Cross-references Lift, Zhang's Metric, and Item Schedules.")
-                if st.button("Generate Combo Strategy"):
-                    with st.spinner("Mining Associations & Schedules..."):
-                        try:
-                            payload = prepare_combo_strategy_payload(df)
-                            response = requests.post(webhook_url, json=payload)
-                            if response.status_code == 200:
-                                st.success("✅ Request Sent! Check your Google Drive.")
-                            else:
-                                st.error(f"❌ Error {response.status_code}: {response.text}")
-                        except Exception as e:
-                            st.error(f"Failed: {e}")
 
 else:
     st.info("👋 Upload data to begin.")
