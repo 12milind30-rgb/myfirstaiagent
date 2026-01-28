@@ -12,8 +12,9 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from datetime import timedelta
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import warnings
-import json
-import requests
+import requests # Ensure requests is imported
+from itertools import combinations # For Combo AI
+from collections import Counter # For Combo AI
 
 # --- NEW IMPORTS FOR HYBRID MODEL ---
 from prophet import Prophet
@@ -103,107 +104,216 @@ def get_hourly_details(df):
     hourly_stats = hourly_stats.sort_values(['Hour', 'Quantity'], ascending=[True, False])
     return hourly_stats[['Time Slot', 'ItemName', 'Quantity', 'TotalAmount']]
 
-# --- NEW: AI AGENT PAYLOAD GENERATOR ---
-def generate_n8n_payload(df):
+# =================================================================================================
+# --- NEW: AI AGENT PAYLOAD GENERATORS (STRATEGIC, CATEGORY, COMBO) ---
+# =================================================================================================
+
+def prepare_strategic_payload(df):
     """
-    Generates a deep structured JSON payload for the n8n AI Agent.
-    This calculates Hourly Curves, Day Ranks, and specific Combo Strategy Logic.
+    Prepares a comprehensive dataset for the AI Strategist (Overview Agent).
+    Calculates Time-based averages, Peak Hours, and Trends.
     """
+    # 1. Basic Metrics
+    total_revenue = df['TotalAmount'].sum()
+    total_orders = df['OrderID'].nunique()
+    avg_order_value = total_revenue / total_orders if total_orders > 0 else 0
+
+    # 2. Time-Based Averages
+    df['Date'] = pd.to_datetime(df['Date'])
     
-    # 1. OVERVIEW DATA
-    total_rev = float(df['TotalAmount'].sum())
-    valid_orders = df[df['TotalAmount'] > 0]
-    total_orders = int(valid_orders['OrderID'].nunique())
-    
-    # Peak Days Ranking
-    day_sales = df.groupby('DayOfWeek')['TotalAmount'].sum().sort_values(ascending=False)
-    sorted_days = day_sales.index.tolist()
-    
-    # Peak Hour Window (Rolling 3hr)
-    hourly_sales = df.groupby('Hour')['TotalAmount'].sum().reindex(range(24), fill_value=0)
-    rolling_sum = hourly_sales.rolling(window=3).sum()
-    peak_hour_end = int(rolling_sum.idxmax())
-    peak_window = f"{max(0, peak_hour_end-2)}:00 - {peak_hour_end+1}:00"
-    
-    # Weekly Performance
-    df['WeekNum'] = df['Date'].dt.isocalendar().week
-    week_sales = df.groupby('WeekNum')['TotalAmount'].sum().sort_values(ascending=False)
-    top_2_weeks_pct = 0
-    if len(week_sales) > 0:
-        top_2_weeks_pct = round((week_sales.head(2).sum() / total_rev) * 100, 1)
+    # Avg Revenue per Day
+    daily_sales = df.groupby(df['Date'].dt.date)['TotalAmount'].sum()
+    avg_rev_per_day = daily_sales.mean()
+
+    # Avg Revenue per Week
+    weekly_sales = df.groupby(df['Date'].dt.isocalendar().week)['TotalAmount'].sum()
+    avg_rev_per_week = weekly_sales.mean()
+
+    # 3. Peak Hours Data
+    peak_hours = df.groupby(df['Hour'])['TotalAmount'].sum().reset_index()
+    peak_hours.columns = ['Hour', 'Revenue']
+    peak_hours_data = peak_hours.to_dict(orient='records')
+
+    # 4. Revenue Trend (Daily)
+    daily_trend = df.groupby(df['Date'].dt.date)['TotalAmount'].sum().reset_index()
+    daily_trend.columns = ['Date', 'Revenue']
+    daily_trend['Date'] = daily_trend['Date'].astype(str) # Serialize date
+    trend_data = daily_trend.to_dict(orient='records')
+
+    # 5. Weekly Performance
+    weekly_trend = df.groupby(df['Date'].dt.isocalendar().week)['TotalAmount'].sum().reset_index()
+    weekly_trend.columns = ['Week_Number', 'Revenue']
+    weekly_performance_data = weekly_trend.to_dict(orient='records')
 
     payload = {
-        "report_metadata": {"type": "Monthly Performance", "generated_by": "Mithas AI"},
-        "overview": {
-            "metrics": {
-                "total_revenue": total_rev,
-                "total_orders": total_orders,
-                "avg_order_value": float(total_rev / total_orders) if total_orders > 0 else 0
-            },
-            "day_analysis": {
-                "ranked_days": sorted_days,
-                "top_day_revenue": float(day_sales.iloc[0]) if len(day_sales) > 0 else 0,
-                "top_vs_second_gap_percent": float(((day_sales.iloc[0] - day_sales.iloc[1]) / day_sales.iloc[1]) * 100) if len(day_sales) > 1 else 0
-            },
-            "hour_analysis": {
-                "peak_window_3hr": peak_window,
-                "peak_window_revenue": float(rolling_sum.max())
-            },
-            "weekly_analysis": {
-                "ranked_weeks": week_sales.index.astype(str).tolist(),
-                "top_2_weeks_contribution_percent": top_2_weeks_pct
-            }
+        "summary_metrics": {
+            "total_revenue": round(total_revenue, 2),
+            "total_orders": total_orders,
+            "average_order_value": round(avg_order_value, 2),
+            "average_revenue_per_day": round(avg_rev_per_day, 2),
+            "average_revenue_per_week": round(avg_rev_per_week, 2)
         },
-        "categories": {},
-        "combos": []
-    }
-
-    # 2. CATEGORY DEEP DIVE
-    categories = df['Category'].unique()
-    days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-    
-    for cat in categories:
-        cat_df = df[df['Category'] == cat]
-        cat_rev = float(cat_df['TotalAmount'].sum())
-        
-        # Hourly Curves (Crucial for Narrative: "Starts low, peaks at 5pm...")
-        hourly_curves = {}
-        for d in days_order:
-            # Get sum per hour, reindex to ensure 24 hours (0-23), fill 0
-            d_data = cat_df[cat_df['DayOfWeek'] == d].groupby('Hour')['Quantity'].sum().reindex(range(24), fill_value=0)
-            hourly_curves[d] = d_data.astype(int).tolist()
-            
-        # Pareto Split (Stars vs Laggards) for this category
-        item_sales = cat_df.groupby('ItemName')['TotalAmount'].sum().sort_values(ascending=False)
-        cumulative = item_sales.cumsum() / cat_rev
-        table_1 = item_sales[cumulative <= 0.91].index.tolist()
-        table_2 = item_sales[cumulative > 0.91].index.tolist()
-        
-        payload["categories"][cat] = {
-            "revenue": cat_rev,
-            "contribution_percent": round((cat_rev / total_rev) * 100, 2),
-            "hourly_curves_by_day": hourly_curves,
-            "table_1_stars": table_1,
-            "table_2_laggards": table_2[:10] # Top 10 laggards only to save tokens
+        "graph_data": {
+            "peak_hours_analysis": peak_hours_data,
+            "daily_revenue_trend": trend_data,
+            "weekly_performance": weekly_performance_data
         }
+    }
+    return payload
 
-    # 3. COMBO STRATEGY
-    # We leverage the existing logic but formatting for the Agent
-    rules = get_combo_analysis_full(df)
-    if not rules.empty:
-        # Filter for "High Lift" + "High Times Sold Together"
-        strategic_combos = rules.sort_values(['lift', 'Times Sold Together'], ascending=False).head(5)
-        for _, row in strategic_combos.iterrows():
-            payload["combos"].append({
-                "anchor": row['Item A'],
-                "target": row['Item B'],
-                "peak_hour": row['Peak Hour'],
-                "lift": float(row['lift']),
-                "orders_together": int(row['Times Sold Together']),
-                "strategy_note": f"Bundle {row['Item B']} with {row['Item A']} at {row['Peak Hour']}"
+def prepare_category_detailed_payload(df):
+    """
+    Prepares deep-dive dataset for Category Agent.
+    Structure: Global Overview (80/20) -> Per Category -> Per Item Matrix.
+    """
+    df = df.copy()
+    df['Date'] = pd.to_datetime(df['Date'])
+    df['Day_Name'] = df['Date'].dt.day_name()
+    
+    # 1. GLOBAL OVERVIEW (80/20 Rule)
+    category_revenue = df.groupby('Category')['TotalAmount'].sum().reset_index()
+    category_revenue = category_revenue.sort_values('TotalAmount', ascending=False)
+    category_overview = category_revenue.to_dict(orient='records')
+
+    # 2. DEEP DIVE DICTIONARY
+    categories_data = {}
+    all_categories = df['Category'].unique()
+    
+    for cat in all_categories:
+        cat_df = df[df['Category'] == cat]
+        
+        # A. Category Level Trends
+        cat_daily = cat_df.groupby('Day_Name')['TotalAmount'].sum().to_dict()
+        cat_hourly = cat_df.groupby('Hour')['TotalAmount'].sum().to_dict()
+        
+        # B. Item Level Trends (The Matrix)
+        items_data = []
+        for item in cat_df['ItemName'].unique():
+            item_df = cat_df[cat_df['ItemName'] == item]
+            
+            # Specific item patterns
+            item_daily = item_df.groupby('Day_Name')['TotalAmount'].sum().to_dict()
+            item_hourly = item_df.groupby('Hour')['TotalAmount'].sum().to_dict()
+            item_total = item_df['TotalAmount'].sum()
+            
+            items_data.append({
+                "item_name": item,
+                "total_revenue": round(item_total, 2),
+                "daily_pattern": item_daily,
+                "hourly_pattern": item_hourly
             })
             
-    return payload
+        categories_data[cat] = {
+            "category_metrics": {
+                "total_revenue": round(cat_df['TotalAmount'].sum(), 2),
+                "daily_sales": cat_daily,
+                "hourly_sales": cat_hourly
+            },
+            "items_analysis": items_data
+        }
+
+    return {
+        "overview_80_20": category_overview,
+        "deep_dives": categories_data
+    }
+
+def calculate_smart_combos_ai(df):
+    """
+    Advanced Association Rules for AI Agent: Support, Confidence, Lift, Conviction, Zhang's Metric.
+    Filters out 'Gifts and Toys' and 'Display Items'.
+    """
+    # 1. FILTER EXCLUDED CATEGORIES
+    excluded_cats = ['Gifts and Toys', 'Display Items']
+    valid_df = df[~df['Category'].isin(excluded_cats)].copy()
+
+    # 2. GROUP ORDERS
+    orders = valid_df.groupby('OrderID')['ItemName'].unique().tolist()
+    item_counts = valid_df['ItemName'].value_counts().to_dict()
+    total_orders = len(orders)
+    
+    pair_counts = Counter()
+    for order_items in orders:
+        if len(order_items) > 1:
+            pair_counts.update(combinations(sorted(order_items), 2))
+            
+    # 3. CALCULATE METRICS
+    combos_data = []
+    # Analyze top 100 pairs for efficiency in AI Payload
+    for (item_a, item_b), count in pair_counts.most_common(100):
+        support_ab = count / total_orders
+        support_a = item_counts[item_a] / total_orders
+        support_b = item_counts[item_b] / total_orders
+        
+        # Confidence
+        conf_a_to_b = support_ab / support_a
+        conf_b_to_a = support_ab / support_b
+        confidence = max(conf_a_to_b, conf_b_to_a)
+        
+        # Lift
+        lift = support_ab / (support_a * support_b) if (support_a * support_b) > 0 else 0
+        
+        # Conviction
+        conv_a_to_b = (1 - support_b) / (1 - conf_a_to_b) if (1 - conf_a_to_b) > 0 else 100
+        conv_b_to_a = (1 - support_a) / (1 - conf_b_to_a) if (1 - conf_b_to_a) > 0 else 100
+        conviction = max(conv_a_to_b, conv_b_to_a)
+        
+        # Zhang's Metric
+        numerator = support_ab - (support_a * support_b)
+        if numerator >= 0:
+            denominator = min(support_a * (1 - support_b), support_b * (1 - support_a))
+        else:
+            denominator = min(support_a * support_b, (1 - support_a) * (1 - support_b))
+        
+        zhangs_metric = numerator / denominator if denominator > 0 else 0
+
+        combos_data.append({
+            "items": [item_a, item_b],
+            "metrics": {
+                "support": round(support_ab, 4),
+                "confidence": round(confidence, 2),
+                "lift": round(lift, 2),
+                "conviction": round(conviction, 2),
+                "zhangs_metric": round(zhangs_metric, 2)
+            }
+        })
+        
+    return combos_data, valid_df
+
+def prepare_combo_strategy_payload(df):
+    """
+    Combines Metrics with Schedules for the Combo Agent.
+    """
+    smart_combos, valid_df = calculate_smart_combos_ai(df)
+    
+    # Get Schedules for relevant items
+    item_schedules = {}
+    target_items = set()
+    for c in smart_combos:
+        target_items.update(c['items'])
+        
+    valid_df['Day'] = pd.to_datetime(valid_df['Date']).dt.day_name()
+    
+    for item in target_items:
+        item_data = valid_df[valid_df['ItemName'] == item]
+        
+        # Avoid errors if item has no sales (rare if in combo, but safety first)
+        if not item_data.empty:
+            busy_days = item_data.groupby('Day')['TotalAmount'].sum().nlargest(3).index.tolist()
+            slow_days = item_data.groupby('Day')['TotalAmount'].sum().nsmallest(3).index.tolist()
+            busy_hours = item_data.groupby('Hour')['TotalAmount'].sum().nlargest(5).index.tolist()
+            
+            item_schedules[item] = {
+                "high_revenue_days": busy_days,
+                "low_revenue_days": slow_days,
+                "peak_hours": busy_hours
+            }
+
+    return {
+        "smart_combos_data": smart_combos,
+        "item_schedules": item_schedules
+    }
+
+# =================================================================================================
 
 # --- ADVANCED HYBRID FORECASTER (FIXED LOGIC) ---
 
@@ -525,31 +635,12 @@ uploaded_file = st.sidebar.file_uploader("Upload Monthly Data (Sidebar)", type=[
 st.sidebar.divider()
 st.sidebar.subheader("🤖 AI Reporting Agent")
 n8n_webhook = st.sidebar.text_input("n8n Webhook URL", placeholder="https://your-n8n.com/webhook/...")
-trigger_btn = st.sidebar.button("Generate & Publish AI Report")
-# -------------------------------
+# Trigger logic moved to Tab 9
 
 if uploaded_file:
     df = load_data(uploaded_file)
     pareto_list = get_pareto_items(df)
     pareto_count = len(pareto_list)
-    
-    # --- NEW: TRIGGER LOGIC ---
-    if trigger_btn:
-        with st.spinner("🧠 AI Agent is calculating Narrative Curves & Strategies..."):
-            try:
-                payload = generate_n8n_payload(df)
-                if n8n_webhook:
-                    response = requests.post(n8n_webhook, json=payload)
-                    if response.status_code == 200:
-                        st.sidebar.success("✅ Report Request Sent to AI Agent!")
-                    else:
-                        st.sidebar.error(f"❌ Failed: {response.status_code}")
-                else:
-                    st.sidebar.warning("⚠️ No Webhook URL. Displaying Payload below for debugging.")
-                    st.expander("🔍 Debug: Agent Payload", expanded=True).json(payload)
-            except Exception as e:
-                st.sidebar.error(f"Error generating payload: {e}")
-    # --------------------------
     
     rules_df = get_combo_analysis_full(df)
     proven_df, potential_df = get_part3_strategy(rules_df)
@@ -559,8 +650,9 @@ if uploaded_file:
     if not proven_df.empty: proven_list = proven_df['pair'].tolist()
     if not potential_df.empty: potential_list = potential_df['pair'].tolist()
     
-    tab1, tab_day_wise, tab_cat, tab2, tab3, tab4, tab_assoc, tab5, tab6 = st.tabs([
-        "Overview", "Day wise Analysis", "Category Details", "Pareto (Visual)", "Time Series", "Smart Combos", "Association Analysis", "Demand Forecast", "AI Chat"
+    # --- UPDATED TABS LIST with 'AI Reports' ---
+    tab1, tab_day_wise, tab_cat, tab2, tab3, tab4, tab_assoc, tab5, tab6, tab_ai = st.tabs([
+        "Overview", "Day wise Analysis", "Category Details", "Pareto (Visual)", "Time Series", "Smart Combos", "Association Analysis", "Demand Forecast", "AI Chat", "🤖 AI Reports"
     ])
 
     # --- TAB 1: OVERVIEW ---
@@ -1152,6 +1244,64 @@ if uploaded_file:
                 st.chat_message("assistant").write(response.content)
                 st.session_state.messages.append({"role": "assistant", "content": response.content})
             except: st.error("Check API Key")
+
+    # --- TAB 9: AI AGENT REPORTS (NEW COMMAND CENTER) ---
+    with tab_ai:
+        st.subheader("🤖 AI Agent Command Center")
+        st.info("Trigger autonomous AI agents via n8n to analyze your store data and generate comprehensive reports.")
+        
+        if not webhook_url:
+            st.warning("⚠️ Please enter your n8n Webhook URL in the sidebar settings to use these features.")
+        else:
+            ai_col1, ai_col2, ai_col3 = st.columns(3)
+            
+            # Button 1: Strategic Overview
+            with ai_col1:
+                st.markdown("#### 📝 Strategic Overview")
+                st.caption("Analyzes Revenue, Peak Hours, and Monthly Trends.")
+                if st.button("Generate Strategy Report"):
+                    with st.spinner("Packaging data & sending to AI Strategist..."):
+                        try:
+                            payload = prepare_strategic_payload(df)
+                            response = requests.post(webhook_url, json=payload)
+                            if response.status_code == 200:
+                                st.success("✅ Request Sent! Check your Google Drive/Email.")
+                            else:
+                                st.error(f"❌ Error {response.status_code}: {response.text}")
+                        except Exception as e:
+                            st.error(f"Failed: {e}")
+
+            # Button 2: Detailed Category Deep Dive
+            with ai_col2:
+                st.markdown("#### 🔍 Category Deep-Dive")
+                st.caption("Analyzes 80/20 Rule and Item-level Hourly Matrices.")
+                if st.button("Generate Category Report"):
+                    with st.spinner("Calculating Item Matrices..."):
+                        try:
+                            payload = prepare_category_detailed_payload(df)
+                            response = requests.post(webhook_url, json=payload)
+                            if response.status_code == 200:
+                                st.success("✅ Request Sent! Check your Google Drive.")
+                            else:
+                                st.error(f"❌ Error {response.status_code}: {response.text}")
+                        except Exception as e:
+                            st.error(f"Failed: {e}")
+
+            # Button 3: Advanced Combo Strategy
+            with ai_col3:
+                st.markdown("#### 🍔 Advanced Combo Strategy")
+                st.caption("Cross-references Lift, Zhang's Metric, and Item Schedules.")
+                if st.button("Generate Combo Strategy"):
+                    with st.spinner("Mining Associations & Schedules..."):
+                        try:
+                            payload = prepare_combo_strategy_payload(df)
+                            response = requests.post(webhook_url, json=payload)
+                            if response.status_code == 200:
+                                st.success("✅ Request Sent! Check your Google Drive.")
+                            else:
+                                st.error(f"❌ Error {response.status_code}: {response.text}")
+                        except Exception as e:
+                            st.error(f"Failed: {e}")
 
 else:
     st.info("👋 Upload data to begin.")
